@@ -1,195 +1,323 @@
-using System.Globalization;
 using System.Runtime.InteropServices;
-using System.Speech.AudioFormat;
-using System.Speech.Recognition;
-using AFKNotifier.Audio;
+using Whisper.net;
+using Whisper.net.Ggml;
 
 namespace AFKNotifier.Services;
 
 public sealed record SpeechObservation(
     string Text,
     float Confidence,
-    string GrammarName,
-    bool IsFinal,
-    bool IsRejected);
+    float NoSpeechProbability,
+    bool MatchesTrigger,
+    int TriggerConfirmations,
+    bool IsSpeech);
 
 public sealed class SpeechRecognizerService : IDisposable
 {
-    private const string TriggerGrammarName = "Trigger";
+    private const int SampleRate = 16000;
+    private const int WindowSamples = SampleRate * 5 / 2;
+    private const int HopSamples = SampleRate;
+    private const int MaxBufferedSamples = SampleRate * 5;
+    private const int TriggerConfirmationsRequired = 2;
+    private const double MinimumAnalysisDbFs = -55;
+    private const float MinimumTranscriptProbability = 0.18f;
+    private const float MinimumTriggerProbability = 0.30f;
+    private const float MaximumNoSpeechProbability = 0.65f;
+    private const long MinimumModelBytes = 50_000_000;
 
+    private static readonly string ModelPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AFK Notifier",
+        "Models",
+        "ggml-tiny.en.bin");
+
+    private readonly object _bufferLock = new();
+    private readonly List<float> _audioBuffer = [];
     private readonly string _triggerPhrase;
-    private readonly float _minimumConfidence;
-    private readonly BlockingAudioStream _audioStream = new();
-    private SpeechRecognitionEngine? _recognizer;
-    private double _latestInputDbFs = -120;
+
+    private CancellationTokenSource? _processingCancellation;
+    private Task? _processingTask;
+    private WhisperFactory? _factory;
+    private WhisperProcessor? _processor;
+    private int _samplesSinceLastAnalysis;
+    private int _consecutiveTriggerMatches;
+    private int _triggerRaised;
     private bool _disposed;
 
-    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.68f)
+    public SpeechRecognizerService(string triggerPhrase)
     {
         _triggerPhrase = triggerPhrase;
-        _minimumConfidence = minimumConfidence;
     }
 
     public event Action<string, float>? TriggerDetected;
     public event Action<SpeechObservation>? SpeechObserved;
     public event Action<double>? InputLevelUpdated;
 
-    public void Start()
+    public bool RequiresModelDownload => !IsModelValid();
+
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        if (_recognizer is not null)
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_processingTask is not null)
         {
             return;
         }
 
-        var installedRecognizers = SpeechRecognitionEngine.InstalledRecognizers();
-        var recognizerInfo = installedRecognizers
-            .FirstOrDefault(info => info.Culture.Name.Equals("en-US", StringComparison.OrdinalIgnoreCase))
-            ?? installedRecognizers.FirstOrDefault()
-            ?? throw new InvalidOperationException("No Windows speech recognizer is installed.");
+        var modelPath = await EnsureModelAsync(cancellationToken);
 
-        var recognizer = new SpeechRecognitionEngine(recognizerInfo)
-        {
-            MaxAlternates = 3
-        };
+        _factory = WhisperFactory.FromPath(modelPath);
+        _processor = _factory.CreateBuilder()
+            .WithLanguage("en")
+            .WithNoContext()
+            .WithSingleSegment()
+            .WithProbabilities()
+            .WithNoSpeechThreshold(0.60f)
+            .Build();
 
-        var choices = new Choices();
-        choices.Add(_triggerPhrase);
-
-        var spelledVariant = GetSpelledAcronymVariant(_triggerPhrase);
-        if (!string.IsNullOrWhiteSpace(spelledVariant) &&
-            !spelledVariant.Equals(_triggerPhrase, StringComparison.OrdinalIgnoreCase))
-        {
-            choices.Add(spelledVariant);
-        }
-
-        var grammarBuilder = new GrammarBuilder
-        {
-            Culture = recognizerInfo.Culture
-        };
-        grammarBuilder.Append(choices);
-
-        var grammar = new Grammar(grammarBuilder)
-        {
-            Name = TriggerGrammarName,
-            Priority = 10,
-            Weight = 1.0f
-        };
-
-        recognizer.LoadGrammar(grammar);
-        recognizer.SpeechRecognized += OnSpeechRecognized;
-        recognizer.SpeechRecognitionRejected += OnSpeechRejected;
-        recognizer.SetInputToAudioStream(
-            _audioStream,
-            new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
-
-        _recognizer = recognizer;
-        recognizer.RecognizeAsync(RecognizeMode.Multiple);
+        _processingCancellation = new CancellationTokenSource();
+        _processingTask = Task.Run(() => ProcessingLoopAsync(_processingCancellation.Token));
     }
 
     public void FeedAudio(ReadOnlySpan<byte> data)
     {
-        _latestInputDbFs = CalculateDbFs(data);
-        InputLevelUpdated?.Invoke(_latestInputDbFs);
-        _audioStream.Enqueue(data);
-    }
-
-    public void Stop()
-    {
-        var recognizer = _recognizer;
-        _recognizer = null;
-
-        if (recognizer is null)
+        if (_processingTask is null || data.Length < sizeof(short))
         {
             return;
         }
 
-        _audioStream.Complete();
+        var byteCount = data.Length - (data.Length % sizeof(short));
+        var pcm = MemoryMarshal.Cast<byte, short>(data[..byteCount]);
+        if (pcm.Length == 0)
+        {
+            return;
+        }
+
+        InputLevelUpdated?.Invoke(CalculateDbFs(pcm));
+
+        var samples = new float[pcm.Length];
+        for (var index = 0; index < pcm.Length; index++)
+        {
+            samples[index] = pcm[index] / 32768f;
+        }
+
+        lock (_bufferLock)
+        {
+            _audioBuffer.AddRange(samples);
+            _samplesSinceLastAnalysis += samples.Length;
+
+            if (_audioBuffer.Count > MaxBufferedSamples)
+            {
+                _audioBuffer.RemoveRange(0, _audioBuffer.Count - MaxBufferedSamples);
+            }
+        }
+    }
+
+    public async Task StopAsync()
+    {
+        var cancellation = _processingCancellation;
+        var processingTask = _processingTask;
+
+        _processingCancellation = null;
+        _processingTask = null;
+
+        if (cancellation is not null)
+        {
+            cancellation.Cancel();
+        }
+
+        if (processingTask is not null)
+        {
+            try
+            {
+                await processingTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        cancellation?.Dispose();
+
+        _processor?.Dispose();
+        _processor = null;
+        _factory?.Dispose();
+        _factory = null;
+
+        lock (_bufferLock)
+        {
+            _audioBuffer.Clear();
+            _samplesSinceLastAnalysis = 0;
+        }
+
+        _consecutiveTriggerMatches = 0;
+        Interlocked.Exchange(ref _triggerRaised, 0);
+    }
+
+    private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await Task.Delay(100, cancellationToken);
+
+            float[]? window = null;
+
+            lock (_bufferLock)
+            {
+                if (_audioBuffer.Count >= WindowSamples && _samplesSinceLastAnalysis >= HopSamples)
+                {
+                    window = _audioBuffer
+                        .GetRange(_audioBuffer.Count - WindowSamples, WindowSamples)
+                        .ToArray();
+                    _samplesSinceLastAnalysis = 0;
+                }
+            }
+
+            if (window is null)
+            {
+                continue;
+            }
+
+            var windowDbFs = CalculateDbFs(window);
+            if (windowDbFs < MinimumAnalysisDbFs)
+            {
+                _consecutiveTriggerMatches = 0;
+                SpeechObserved?.Invoke(new SpeechObservation(
+                    string.Empty,
+                    0,
+                    1,
+                    false,
+                    0,
+                    false));
+                continue;
+            }
+
+            await AnalyzeWindowAsync(window, cancellationToken);
+        }
+    }
+
+    private async Task AnalyzeWindowAsync(float[] samples, CancellationToken cancellationToken)
+    {
+        var processor = _processor;
+        if (processor is null)
+        {
+            return;
+        }
+
+        var segments = new List<SegmentData>();
+        await foreach (var segment in processor.ProcessAsync(samples, cancellationToken))
+        {
+            if (!string.IsNullOrWhiteSpace(segment.Text))
+            {
+                segments.Add(segment);
+            }
+        }
+
+        var usableSegments = segments
+            .Where(segment =>
+                segment.Probability >= MinimumTranscriptProbability &&
+                segment.NoSpeechProbability <= MaximumNoSpeechProbability)
+            .ToArray();
+
+        if (usableSegments.Length == 0)
+        {
+            _consecutiveTriggerMatches = 0;
+            var noSpeechProbability = segments.Count == 0
+                ? 1f
+                : segments.Average(segment => segment.NoSpeechProbability);
+
+            SpeechObserved?.Invoke(new SpeechObservation(
+                string.Empty,
+                0,
+                noSpeechProbability,
+                false,
+                0,
+                false));
+            return;
+        }
+
+        var text = string.Join(' ', usableSegments.Select(segment => segment.Text.Trim())).Trim();
+        var confidence = usableSegments.Average(segment => segment.Probability);
+        var noSpeech = usableSegments.Average(segment => segment.NoSpeechProbability);
+        var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase) &&
+            confidence >= MinimumTriggerProbability &&
+            noSpeech <= MaximumNoSpeechProbability;
+
+        if (matchesTrigger)
+        {
+            _consecutiveTriggerMatches++;
+        }
+        else
+        {
+            _consecutiveTriggerMatches = 0;
+        }
+
+        SpeechObserved?.Invoke(new SpeechObservation(
+            text,
+            confidence,
+            noSpeech,
+            matchesTrigger,
+            _consecutiveTriggerMatches,
+            true));
+
+        if (matchesTrigger &&
+            _consecutiveTriggerMatches >= TriggerConfirmationsRequired &&
+            Interlocked.Exchange(ref _triggerRaised, 1) == 0)
+        {
+            TriggerDetected?.Invoke(text, confidence);
+        }
+    }
+
+    private static async Task<string> EnsureModelAsync(CancellationToken cancellationToken)
+    {
+        if (IsModelValid())
+        {
+            return ModelPath;
+        }
+
+        var directory = Path.GetDirectoryName(ModelPath)!;
+        Directory.CreateDirectory(directory);
+
+        var temporaryPath = ModelPath + ".download";
+        if (File.Exists(temporaryPath))
+        {
+            File.Delete(temporaryPath);
+        }
 
         try
         {
-            recognizer.RecognizeAsyncCancel();
+            using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(GgmlType.TinyEn);
+            await using (var fileStream = File.Create(temporaryPath))
+            {
+                await modelStream.CopyToAsync(fileStream, cancellationToken);
+            }
+
+            if (new FileInfo(temporaryPath).Length < MinimumModelBytes)
+            {
+                throw new InvalidDataException("The downloaded Whisper model is incomplete.");
+            }
+
+            File.Move(temporaryPath, ModelPath, true);
+            return ModelPath;
         }
         catch
         {
-        }
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
 
-        recognizer.SpeechRecognized -= OnSpeechRecognized;
-        recognizer.SpeechRecognitionRejected -= OnSpeechRejected;
-        recognizer.Dispose();
-    }
-
-    private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs eventArgs)
-    {
-        var result = eventArgs.Result;
-
-        SpeechObserved?.Invoke(new SpeechObservation(
-            result.Text,
-            result.Confidence,
-            BuildSourceLabel(),
-            true,
-            false));
-
-        if (result.Confidence < _minimumConfidence)
-        {
-            return;
-        }
-
-        if (TriggerDetector.Matches(result.Text, _triggerPhrase))
-        {
-            TriggerDetected?.Invoke(result.Text, result.Confidence);
+            throw;
         }
     }
 
-    private void OnSpeechRejected(object? sender, SpeechRecognitionRejectedEventArgs eventArgs)
+    private static bool IsModelValid()
     {
-        var result = eventArgs.Result;
-        SpeechObserved?.Invoke(new SpeechObservation(
-            string.Empty,
-            result?.Confidence ?? 0,
-            BuildSourceLabel(),
-            true,
-            true));
+        return File.Exists(ModelPath) && new FileInfo(ModelPath).Length >= MinimumModelBytes;
     }
 
-    private string BuildSourceLabel()
+    private static double CalculateDbFs(ReadOnlySpan<short> samples)
     {
-        var levelState = _latestInputDbFs switch
-        {
-            > -3 => "HOT",
-            < -48 => "LOW",
-            _ => "OK"
-        };
-
-        return $"PHRASE SPOTTER // INPUT {_latestInputDbFs:0} DBFS {levelState}";
-    }
-
-    private static string? GetSpelledAcronymVariant(string phrase)
-    {
-        var compact = new string(phrase.Where(char.IsLetterOrDigit).ToArray());
-        if (compact.Length is < 2 or > 6 || !compact.All(char.IsLetter))
-        {
-            return null;
-        }
-
-        var visibleLetters = phrase.Where(char.IsLetter).ToArray();
-        var looksLikeAcronym = visibleLetters.All(char.IsUpper) || phrase.Any(character => char.IsWhiteSpace(character) || character is '.' or '-' or '_');
-        if (!looksLikeAcronym)
-        {
-            return null;
-        }
-
-        return string.Join(' ', compact.ToUpperInvariant().ToCharArray());
-    }
-
-    private static double CalculateDbFs(ReadOnlySpan<byte> pcm16)
-    {
-        var byteCount = pcm16.Length - (pcm16.Length % sizeof(short));
-        if (byteCount <= 0)
-        {
-            return -120;
-        }
-
-        var samples = MemoryMarshal.Cast<byte, short>(pcm16[..byteCount]);
         if (samples.Length == 0)
         {
             return -120;
@@ -202,7 +330,27 @@ public sealed class SpeechRecognizerService : IDisposable
             sumSquares += normalized * normalized;
         }
 
-        var rms = Math.Sqrt(sumSquares / samples.Length);
+        return RmsToDbFs(Math.Sqrt(sumSquares / samples.Length));
+    }
+
+    private static double CalculateDbFs(ReadOnlySpan<float> samples)
+    {
+        if (samples.Length == 0)
+        {
+            return -120;
+        }
+
+        double sumSquares = 0;
+        foreach (var sample in samples)
+        {
+            sumSquares += sample * sample;
+        }
+
+        return RmsToDbFs(Math.Sqrt(sumSquares / samples.Length));
+    }
+
+    private static double RmsToDbFs(double rms)
+    {
         if (rms <= 0.000001)
         {
             return -120;
@@ -219,7 +367,6 @@ public sealed class SpeechRecognizerService : IDisposable
         }
 
         _disposed = true;
-        Stop();
-        _audioStream.Dispose();
+        StopAsync().GetAwaiter().GetResult();
     }
 }
