@@ -16,17 +16,19 @@ public sealed record SpeechObservation(
 public sealed class SpeechRecognizerService : IDisposable
 {
     private const int SampleRate = 16000;
-    private const int WindowSamples = SampleRate * 5 / 2;
-    private const int HopSamples = SampleRate;
-    private const int MaxBufferedSamples = SampleRate * 5;
-    private const int TriggerConfirmationsRequired = 2;
+    private const int WindowSamples = SampleRate * 7 / 4;
+    private const int HopSamples = SampleRate / 2;
+    private const int MaxBufferedSamples = SampleRate * 3;
     private const double MinimumAnalysisDbFs = -55;
-    private const float MinimumTranscriptProbability = 0.18f;
-    private const float MinimumTriggerProbability = 0.30f;
-    private const float MaximumNoSpeechProbability = 0.65f;
+    private const float MinimumTranscriptProbability = 0.10f;
+    private const float MinimumTriggerProbability = 0.20f;
+    private const float StrongTriggerProbability = 0.50f;
+    private const float MaximumNoSpeechProbability = 0.70f;
+    private const float StrongTriggerMaximumNoSpeechProbability = 0.40f;
     private const long MinimumModelBytes = 50_000_000;
     private const string ModelDownloadUrl = "https://huggingface.co/sandrohanea/whisper.net/resolve/v5/classic/ggml-tiny.en.bin";
 
+    private static readonly TimeSpan TriggerEvidenceWindow = TimeSpan.FromSeconds(2.2);
     private static readonly string ModelPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "AFK Notifier",
@@ -41,8 +43,9 @@ public sealed class SpeechRecognizerService : IDisposable
     private Task? _processingTask;
     private WhisperFactory? _factory;
     private int _samplesSinceLastAnalysis;
-    private int _consecutiveTriggerMatches;
+    private int _triggerEvidence;
     private int _triggerRaised;
+    private DateTime _lastTriggerEvidenceUtc = DateTime.MinValue;
     private bool _disposed;
 
     public SpeechRecognizerService(string triggerPhrase)
@@ -141,7 +144,8 @@ public sealed class SpeechRecognizerService : IDisposable
             _samplesSinceLastAnalysis = 0;
         }
 
-        _consecutiveTriggerMatches = 0;
+        _triggerEvidence = 0;
+        _lastTriggerEvidenceUtc = DateTime.MinValue;
         Interlocked.Exchange(ref _triggerRaised, 0);
     }
 
@@ -149,7 +153,7 @@ public sealed class SpeechRecognizerService : IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await Task.Delay(100, cancellationToken);
+            await Task.Delay(50, cancellationToken);
 
             float[]? window = null;
 
@@ -172,13 +176,13 @@ public sealed class SpeechRecognizerService : IDisposable
             var windowDbFs = CalculateDbFs(window);
             if (windowDbFs < MinimumAnalysisDbFs)
             {
-                _consecutiveTriggerMatches = 0;
+                ExpireOldTriggerEvidence();
                 SpeechObserved?.Invoke(new SpeechObservation(
                     string.Empty,
                     0,
                     1,
                     false,
-                    0,
+                    _triggerEvidence,
                     false));
                 continue;
             }
@@ -200,7 +204,7 @@ public sealed class SpeechRecognizerService : IDisposable
             .WithNoContext()
             .WithSingleSegment()
             .WithProbabilities()
-            .WithNoSpeechThreshold(0.60f)
+            .WithNoSpeechThreshold(MaximumNoSpeechProbability)
             .Build();
 
         var transcriptParts = new List<string>();
@@ -223,13 +227,13 @@ public sealed class SpeechRecognizerService : IDisposable
 
         if (transcriptParts.Count == 0)
         {
-            _consecutiveTriggerMatches = 0;
+            ExpireOldTriggerEvidence();
             SpeechObserved?.Invoke(new SpeechObservation(
                 string.Empty,
                 0,
                 1,
                 false,
-                0,
+                _triggerEvidence,
                 false));
             return;
         }
@@ -241,13 +245,23 @@ public sealed class SpeechRecognizerService : IDisposable
             confidence >= MinimumTriggerProbability &&
             noSpeech <= MaximumNoSpeechProbability;
 
+        var confirmed = false;
+
         if (matchesTrigger)
         {
-            _consecutiveTriggerMatches++;
+            var now = DateTime.UtcNow;
+            _triggerEvidence = now - _lastTriggerEvidenceUtc <= TriggerEvidenceWindow
+                ? _triggerEvidence + 1
+                : 1;
+            _lastTriggerEvidenceUtc = now;
+
+            var strongMatch = confidence >= StrongTriggerProbability &&
+                noSpeech <= StrongTriggerMaximumNoSpeechProbability;
+            confirmed = strongMatch || _triggerEvidence >= 2;
         }
         else
         {
-            _consecutiveTriggerMatches = 0;
+            ExpireOldTriggerEvidence();
         }
 
         SpeechObserved?.Invoke(new SpeechObservation(
@@ -255,14 +269,21 @@ public sealed class SpeechRecognizerService : IDisposable
             confidence,
             noSpeech,
             matchesTrigger,
-            _consecutiveTriggerMatches,
+            confirmed ? 2 : Math.Min(_triggerEvidence, 1),
             true));
 
-        if (matchesTrigger &&
-            _consecutiveTriggerMatches >= TriggerConfirmationsRequired &&
-            Interlocked.Exchange(ref _triggerRaised, 1) == 0)
+        if (confirmed && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
         {
             TriggerDetected?.Invoke(text, confidence);
+        }
+    }
+
+    private void ExpireOldTriggerEvidence()
+    {
+        if (_triggerEvidence > 0 && DateTime.UtcNow - _lastTriggerEvidenceUtc > TriggerEvidenceWindow)
+        {
+            _triggerEvidence = 0;
+            _lastTriggerEvidenceUtc = DateTime.MinValue;
         }
     }
 
