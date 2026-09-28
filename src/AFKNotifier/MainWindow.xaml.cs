@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Input;
 using AFKNotifier.Models;
 using AFKNotifier.Services;
 
@@ -33,6 +34,24 @@ public partial class MainWindow : Window
         ConfirmationVolumeTextBox.Text = _settings.ConfirmationBeepVolumePercent.ToString("0.##");
         ConfirmationPitchTextBox.Text = _settings.ConfirmationBeepPitchHz.ToString("0.##");
         RefreshSelections();
+    }
+
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ButtonState == MouseButtonState.Pressed)
+        {
+            DragMove();
+        }
+    }
+
+    private void MinimizeButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
     }
 
     private void RefreshButton_Click(object sender, RoutedEventArgs e)
