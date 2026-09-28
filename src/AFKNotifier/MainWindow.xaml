@@ -5,6 +5,7 @@
         Width="620"
         Height="700"
         ResizeMode="NoResize"
+        WindowStyle="None"
         WindowStartupLocation="CenterScreen"
         Background="#0D1015"
         Foreground="#F2F4F8"
@@ -42,137 +43,222 @@
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
 
+        <Style x:Key="TitleBarButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="46"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#DCE2EA"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Cursor" Value="Arrow"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBackground" Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBackground" Property="Background" Value="#202731"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBackground" Property="Background" Value="#2A333F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CloseTitleBarButtonStyle" TargetType="Button" BasedOn="{StaticResource TitleBarButtonStyle}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBackground" Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBackground" Property="Background" Value="#C42B1C"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBackground" Property="Background" Value="#9E2116"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="SectionBorderStyle" TargetType="Border">
             <Setter Property="Background" Value="#161B22"/>
             <Setter Property="BorderBrush" Value="#303A47"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="CornerRadius" Value="10"/>
-            <Setter Property="Padding" Value="12"/>
+            <Setter Property="Padding" Value="11"/>
         </Style>
     </Window.Resources>
 
-    <Border Margin="8"
-            Background="#11151B"
-            BorderBrush="#252E39"
-            BorderThickness="1"
-            CornerRadius="12">
-        <StackPanel Margin="20">
-            <StackPanel Margin="0,0,0,14">
-                <TextBlock Text="AFK Notifier" FontSize="27" FontWeight="SemiBold"/>
-                <TextBlock Text="Monitor one application's audio and alert until AFK is heard."
-                           Margin="0,4,0,0"
-                           Foreground="#9EA8B7"
-                           FontSize="13"/>
-            </StackPanel>
+    <Grid Background="#0D1015">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="34"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-            <Grid Margin="0,0,0,12">
+        <Border Grid.Row="0" Background="#0D1015" BorderBrush="#252E39" BorderThickness="0,0,0,1">
+            <Grid MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,10,0">
-                    <TextBlock Text="Application input" Margin="0,0,0,5" Foreground="#C7CDD7"/>
-                    <ComboBox x:Name="ApplicationComboBox" DisplayMemberPath="DisplayName" MinHeight="36"/>
-                </StackPanel>
+
+                <TextBlock Grid.Column="0"
+                           Text="AFK Notifier"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           FontSize="12"
+                           Foreground="#DCE2EA"/>
+
                 <Button Grid.Column="1"
-                        x:Name="RefreshButton"
-                        Content="Refresh"
-                        VerticalAlignment="Bottom"
-                        MinHeight="36"
-                        Click="RefreshButton_Click"/>
+                        Style="{StaticResource TitleBarButtonStyle}"
+                        Content="—"
+                        Click="MinimizeButton_Click"/>
+                <Button Grid.Column="2"
+                        Style="{StaticResource CloseTitleBarButtonStyle}"
+                        Content="✕"
+                        Click="CloseButton_Click"/>
             </Grid>
+        </Border>
 
-            <StackPanel Margin="0,0,0,12">
-                <TextBlock Text="Alert output" Margin="0,0,0,5" Foreground="#C7CDD7"/>
-                <ComboBox x:Name="OutputComboBox" DisplayMemberPath="DisplayName" MinHeight="36"/>
-            </StackPanel>
-
-            <Grid Margin="0,0,0,12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="16"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0">
-                    <TextBlock Text="Trigger phrase" Margin="0,0,0,5" Foreground="#C7CDD7"/>
-                    <TextBox x:Name="TriggerTextBox" Text="AFK"/>
-                </StackPanel>
-                <StackPanel Grid.Column="2">
-                    <TextBlock Text="Beep interval (seconds)" Margin="0,0,0,5" Foreground="#C7CDD7"/>
-                    <TextBox x:Name="IntervalTextBox" Text="1.0"/>
-                </StackPanel>
-            </Grid>
-
-            <Border Style="{StaticResource SectionBorderStyle}" Margin="0,0,0,12">
-                <StackPanel>
-                    <TextBlock Text="Beep settings" FontWeight="SemiBold" Margin="0,0,0,8"/>
-
-                    <Grid Margin="0,0,0,8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="1.15*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Idle beep" VerticalAlignment="Center" Foreground="#C7CDD7"/>
-                        <StackPanel Grid.Column="2">
-                            <TextBlock Text="Pitch (Hz)" Margin="0,0,0,4" Foreground="#929DAC" FontSize="12"/>
-                            <TextBox x:Name="IdlePitchTextBox" Text="750"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="4">
-                            <TextBlock Text="Volume (%)" Margin="0,0,0,4" Foreground="#929DAC" FontSize="12"/>
-                            <TextBox x:Name="IdleVolumeTextBox" Text="28"/>
-                        </StackPanel>
-                    </Grid>
-
-                    <Border Height="1" Background="#252E39" Margin="0,0,0,8"/>
-
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="1.15*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="12"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Confirmation" VerticalAlignment="Center" Foreground="#C7CDD7"/>
-                        <StackPanel Grid.Column="2">
-                            <TextBlock Text="Pitch (Hz)" Margin="0,0,0,4" Foreground="#929DAC" FontSize="12"/>
-                            <TextBox x:Name="ConfirmationPitchTextBox" Text="1000"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="4">
-                            <TextBlock Text="Volume (%)" Margin="0,0,0,4" Foreground="#929DAC" FontSize="12"/>
-                            <TextBox x:Name="ConfirmationVolumeTextBox" Text="28"/>
-                        </StackPanel>
-                    </Grid>
-                </StackPanel>
-            </Border>
-
-            <Border Style="{StaticResource SectionBorderStyle}" Margin="0,0,0,12" Padding="12,10">
-                <StackPanel>
-                    <TextBlock Text="Audio path" FontWeight="SemiBold"/>
-                    <TextBlock Text="Selected application → process loopback → local speech recognition"
+        <Border Grid.Row="1"
+                Margin="8"
+                Background="#11151B"
+                BorderBrush="#252E39"
+                BorderThickness="1"
+                CornerRadius="12">
+            <StackPanel Margin="18">
+                <StackPanel Margin="0,0,0,12">
+                    <TextBlock Text="AFK Notifier" FontSize="25" FontWeight="SemiBold"/>
+                    <TextBlock Text="Monitor one application's audio and alert until AFK is heard."
                                Margin="0,3,0,0"
                                Foreground="#9EA8B7"
-                               TextWrapping="Wrap"/>
-                    <TextBlock Text="The microphone is not used."
-                               Margin="0,2,0,0"
-                               Foreground="#9EA8B7"/>
+                               FontSize="12"/>
                 </StackPanel>
-            </Border>
 
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                <Button x:Name="StartButton" Content="Start" Width="110" Click="StartButton_Click"/>
-                <Button x:Name="StopButton" Content="Stop" Width="110" Margin="10,0,0,0" IsEnabled="False" Click="StopButton_Click"/>
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                        <TextBlock Text="Application input" Margin="0,0,0,4" Foreground="#C7CDD7"/>
+                        <ComboBox x:Name="ApplicationComboBox" DisplayMemberPath="DisplayName" MinHeight="34"/>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            x:Name="RefreshButton"
+                            Content="Refresh"
+                            VerticalAlignment="Bottom"
+                            MinHeight="34"
+                            Click="RefreshButton_Click"/>
+                </Grid>
+
+                <StackPanel Margin="0,0,0,10">
+                    <TextBlock Text="Alert output" Margin="0,0,0,4" Foreground="#C7CDD7"/>
+                    <ComboBox x:Name="OutputComboBox" DisplayMemberPath="DisplayName" MinHeight="34"/>
+                </StackPanel>
+
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="14"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="Trigger phrase" Margin="0,0,0,4" Foreground="#C7CDD7"/>
+                        <TextBox x:Name="TriggerTextBox" Text="AFK"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Beep interval (seconds)" Margin="0,0,0,4" Foreground="#C7CDD7"/>
+                        <TextBox x:Name="IntervalTextBox" Text="1.0"/>
+                    </StackPanel>
+                </Grid>
+
+                <Border Style="{StaticResource SectionBorderStyle}" Margin="0,0,0,10">
+                    <StackPanel>
+                        <TextBlock Text="Beep settings" FontWeight="SemiBold" Margin="0,0,0,7"/>
+
+                        <Grid Margin="0,0,0,7">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.15*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Idle beep" VerticalAlignment="Center" Foreground="#C7CDD7"/>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Pitch (Hz)" Margin="0,0,0,3" Foreground="#929DAC" FontSize="11"/>
+                                <TextBox x:Name="IdlePitchTextBox" Text="750"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="4">
+                                <TextBlock Text="Volume (%)" Margin="0,0,0,3" Foreground="#929DAC" FontSize="11"/>
+                                <TextBox x:Name="IdleVolumeTextBox" Text="28"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <Border Height="1" Background="#252E39" Margin="0,0,0,7"/>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.15*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Confirmation" VerticalAlignment="Center" Foreground="#C7CDD7"/>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Pitch (Hz)" Margin="0,0,0,3" Foreground="#929DAC" FontSize="11"/>
+                                <TextBox x:Name="ConfirmationPitchTextBox" Text="1000"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="4">
+                                <TextBlock Text="Volume (%)" Margin="0,0,0,3" Foreground="#929DAC" FontSize="11"/>
+                                <TextBox x:Name="ConfirmationVolumeTextBox" Text="28"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource SectionBorderStyle}" Margin="0,0,0,10" Padding="11,9">
+                    <StackPanel>
+                        <TextBlock Text="Audio path" FontWeight="SemiBold"/>
+                        <TextBlock Text="Selected application → process loopback → local speech recognition"
+                                   Margin="0,2,0,0"
+                                   Foreground="#9EA8B7"
+                                   FontSize="12"
+                                   TextWrapping="Wrap"/>
+                        <TextBlock Text="The microphone is not used."
+                                   Margin="0,1,0,0"
+                                   Foreground="#9EA8B7"
+                                   FontSize="12"/>
+                    </StackPanel>
+                </Border>
+
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <Button x:Name="StartButton" Content="Start" Width="110" Click="StartButton_Click"/>
+                    <Button x:Name="StopButton" Content="Stop" Width="110" Margin="10,0,0,0" IsEnabled="False" Click="StopButton_Click"/>
+                </StackPanel>
+
+                <Border Style="{StaticResource SectionBorderStyle}" Padding="10,8">
+                    <TextBlock x:Name="StatusTextBlock"
+                               Text="Ready"
+                               Foreground="#B6C0CE"
+                               TextWrapping="Wrap"/>
+                </Border>
             </StackPanel>
-
-            <Border Style="{StaticResource SectionBorderStyle}" Padding="11,9">
-                <TextBlock x:Name="StatusTextBlock"
-                           Text="Ready"
-                           Foreground="#B6C0CE"
-                           TextWrapping="Wrap"/>
-            </Border>
-        </StackPanel>
-    </Border>
+        </Border>
+    </Grid>
 </Window>
