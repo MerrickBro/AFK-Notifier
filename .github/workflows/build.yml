@@ -38,6 +38,16 @@ jobs:
           dotnet publish src/AFKNotifier.Updater/AFKNotifier.Updater.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output publish/updater --nologo
           Copy-Item publish/updater/AFKNotifier.Updater.exe publish/app/AFKNotifier.Updater.exe -Force
 
+      - name: Publish recognition worker
+        shell: pwsh
+        run: |
+          dotnet publish src/AFKNotifier.RecognizerWorker/AFKNotifier.RecognizerWorker.csproj --configuration Release --runtime win-x64 --self-contained true --output publish/worker --nologo
+          New-Item -ItemType Directory -Path publish/app/RecognizerWorker -Force | Out-Null
+          Copy-Item publish/worker/* publish/app/RecognizerWorker -Recurse -Force
+          if (-not (Test-Path publish/app/RecognizerWorker/AFKNotifier.RecognizerWorker.exe)) {
+            throw "AFKNotifier.RecognizerWorker.exe was not produced correctly."
+          }
+
       - name: Add website font
         shell: pwsh
         run: |
