@@ -11,15 +11,16 @@ public partial class App : Application
     private Mutex? _instanceMutex;
     private EventWaitHandle? _activationEvent;
     private CancellationTokenSource? _activationCancellation;
+    private bool _ownsInstance;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
         _activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
-        _instanceMutex = new Mutex(true, MutexName, out var createdNew);
+        _instanceMutex = new Mutex(true, MutexName, out _ownsInstance);
 
-        if (!createdNew)
+        if (!_ownsInstance)
         {
             _activationEvent.Set();
             Shutdown();
@@ -69,23 +70,20 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _activationCancellation?.Cancel();
-        _activationEvent?.Set();
-        _activationCancellation?.Dispose();
-        _activationEvent?.Dispose();
-
-        if (_instanceMutex is not null)
+        if (_ownsInstance)
         {
-            try
+            _activationCancellation?.Cancel();
+            _activationEvent?.Set();
+            _activationCancellation?.Dispose();
+
+            if (_instanceMutex is not null)
             {
                 _instanceMutex.ReleaseMutex();
             }
-            catch (ApplicationException)
-            {
-            }
-
-            _instanceMutex.Dispose();
         }
+
+        _activationEvent?.Dispose();
+        _instanceMutex?.Dispose();
 
         base.OnExit(e);
     }
