@@ -19,11 +19,13 @@ public sealed class SpeechRecognizerService : IDisposable
 
     private readonly string _triggerPhrase;
     private readonly float _minimumConfidence;
-    private readonly BlockingAudioStream _audioStream = new();
-    private SpeechRecognitionEngine? _recognizer;
+    private readonly BlockingAudioStream _triggerAudioStream = new();
+    private readonly BlockingAudioStream _dictationAudioStream = new();
+    private SpeechRecognitionEngine? _triggerRecognizer;
+    private SpeechRecognitionEngine? _dictationRecognizer;
     private bool _disposed;
 
-    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.68f)
+    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.62f)
     {
         _triggerPhrase = triggerPhrase;
         _minimumConfidence = minimumConfidence;
@@ -34,7 +36,7 @@ public sealed class SpeechRecognizerService : IDisposable
 
     public void Start()
     {
-        if (_recognizer is not null)
+        if (_triggerRecognizer is not null || _dictationRecognizer is not null)
         {
             return;
         }
@@ -45,15 +47,51 @@ public sealed class SpeechRecognizerService : IDisposable
             ?? installedRecognizers.FirstOrDefault()
             ?? throw new InvalidOperationException("No Windows speech recognizer is installed.");
 
+        var triggerRecognizer = CreateTriggerRecognizer(recognizerInfo);
+        var dictationRecognizer = CreateDictationRecognizer(recognizerInfo);
+
+        _triggerRecognizer = triggerRecognizer;
+        _dictationRecognizer = dictationRecognizer;
+
+        triggerRecognizer.RecognizeAsync(RecognizeMode.Multiple);
+        dictationRecognizer.RecognizeAsync(RecognizeMode.Multiple);
+    }
+
+    public void FeedAudio(ReadOnlySpan<byte> data)
+    {
+        _triggerAudioStream.Enqueue(data);
+        _dictationAudioStream.Enqueue(data);
+    }
+
+    public void Stop()
+    {
+        var triggerRecognizer = _triggerRecognizer;
+        var dictationRecognizer = _dictationRecognizer;
+        _triggerRecognizer = null;
+        _dictationRecognizer = null;
+
+        _triggerAudioStream.Complete();
+        _dictationAudioStream.Complete();
+
+        StopTriggerRecognizer(triggerRecognizer);
+        StopDictationRecognizer(dictationRecognizer);
+    }
+
+    private SpeechRecognitionEngine CreateTriggerRecognizer(RecognizerInfo recognizerInfo)
+    {
         var recognizer = new SpeechRecognitionEngine(recognizerInfo)
         {
-            MaxAlternates = 5
+            MaxAlternates = 3
         };
 
-        var choices = new Choices(_triggerPhrase);
-        if (TriggerDetector.Matches("AFK", _triggerPhrase))
+        var choices = new Choices();
+        choices.Add(_triggerPhrase);
+
+        var spelledVariant = GetSpelledAcronymVariant(_triggerPhrase);
+        if (!string.IsNullOrWhiteSpace(spelledVariant) &&
+            !spelledVariant.Equals(_triggerPhrase, StringComparison.OrdinalIgnoreCase))
         {
-            choices.Add("A F K");
+            choices.Add(spelledVariant);
         }
 
         var grammarBuilder = new GrammarBuilder
@@ -62,91 +100,56 @@ public sealed class SpeechRecognizerService : IDisposable
         };
         grammarBuilder.Append(choices);
 
-        var triggerGrammar = new Grammar(grammarBuilder)
+        var grammar = new Grammar(grammarBuilder)
         {
             Name = TriggerGrammarName,
             Priority = 10,
             Weight = 1.0f
         };
 
-        var dictationGrammar = new DictationGrammar
-        {
-            Name = DictationGrammarName,
-            Priority = 0,
-            Weight = 0.70f
-        };
-
-        recognizer.LoadGrammar(triggerGrammar);
-        recognizer.LoadGrammar(dictationGrammar);
-        recognizer.SpeechHypothesized += OnSpeechHypothesized;
-        recognizer.SpeechRecognized += OnSpeechRecognized;
-        recognizer.SpeechRecognitionRejected += OnSpeechRecognitionRejected;
+        recognizer.LoadGrammar(grammar);
+        recognizer.SpeechRecognized += OnTriggerSpeechRecognized;
+        recognizer.SpeechRecognitionRejected += OnTriggerSpeechRejected;
         recognizer.SetInputToAudioStream(
-            _audioStream,
+            _triggerAudioStream,
             new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
 
-        _recognizer = recognizer;
-        recognizer.RecognizeAsync(RecognizeMode.Multiple);
+        return recognizer;
     }
 
-    public void FeedAudio(ReadOnlySpan<byte> data)
+    private SpeechRecognitionEngine CreateDictationRecognizer(RecognizerInfo recognizerInfo)
     {
-        _audioStream.Enqueue(data);
+        var recognizer = new SpeechRecognitionEngine(recognizerInfo)
+        {
+            MaxAlternates = 5
+        };
+
+        var dictationGrammar = new DictationGrammar
+        {
+            Name = DictationGrammarName
+        };
+
+        recognizer.LoadGrammar(dictationGrammar);
+        recognizer.SpeechHypothesized += OnDictationSpeechHypothesized;
+        recognizer.SpeechRecognized += OnDictationSpeechRecognized;
+        recognizer.SpeechRecognitionRejected += OnDictationSpeechRejected;
+        recognizer.SetInputToAudioStream(
+            _dictationAudioStream,
+            new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
+
+        return recognizer;
     }
 
-    public void Stop()
-    {
-        var recognizer = _recognizer;
-        _recognizer = null;
-
-        if (recognizer is null)
-        {
-            return;
-        }
-
-        _audioStream.Complete();
-
-        try
-        {
-            recognizer.RecognizeAsyncCancel();
-        }
-        catch
-        {
-        }
-
-        recognizer.SpeechHypothesized -= OnSpeechHypothesized;
-        recognizer.SpeechRecognized -= OnSpeechRecognized;
-        recognizer.SpeechRecognitionRejected -= OnSpeechRecognitionRejected;
-        recognizer.Dispose();
-    }
-
-    private void OnSpeechHypothesized(object? sender, SpeechHypothesizedEventArgs eventArgs)
+    private void OnTriggerSpeechRecognized(object? sender, SpeechRecognizedEventArgs eventArgs)
     {
         var result = eventArgs.Result;
-        SpeechObserved?.Invoke(new SpeechObservation(
-            result.Text,
-            result.Confidence,
-            result.Grammar?.Name ?? "Hypothesis",
-            false,
-            false));
-    }
-
-    private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs eventArgs)
-    {
-        var result = eventArgs.Result;
-        var grammarName = result.Grammar?.Name ?? "Unknown";
 
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            grammarName,
+            TriggerGrammarName,
             true,
             false));
-
-        if (!grammarName.Equals(TriggerGrammarName, StringComparison.Ordinal))
-        {
-            return;
-        }
 
         if (result.Confidence < _minimumConfidence)
         {
@@ -159,15 +162,112 @@ public sealed class SpeechRecognizerService : IDisposable
         }
     }
 
-    private void OnSpeechRecognitionRejected(object? sender, SpeechRecognitionRejectedEventArgs eventArgs)
+    private void OnTriggerSpeechRejected(object? sender, SpeechRecognitionRejectedEventArgs eventArgs)
+    {
+        var result = eventArgs.Result;
+        if (result is null || string.IsNullOrWhiteSpace(result.Text))
+        {
+            return;
+        }
+
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result.Text,
+            result.Confidence,
+            TriggerGrammarName,
+            true,
+            true));
+    }
+
+    private void OnDictationSpeechHypothesized(object? sender, SpeechHypothesizedEventArgs eventArgs)
     {
         var result = eventArgs.Result;
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            result.Grammar?.Name ?? "Rejected",
+            DictationGrammarName,
+            false,
+            false));
+    }
+
+    private void OnDictationSpeechRecognized(object? sender, SpeechRecognizedEventArgs eventArgs)
+    {
+        var result = eventArgs.Result;
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result.Text,
+            result.Confidence,
+            DictationGrammarName,
+            true,
+            false));
+    }
+
+    private void OnDictationSpeechRejected(object? sender, SpeechRecognitionRejectedEventArgs eventArgs)
+    {
+        var result = eventArgs.Result;
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result?.Text ?? string.Empty,
+            result?.Confidence ?? 0,
+            DictationGrammarName,
             true,
             true));
+    }
+
+    private static string? GetSpelledAcronymVariant(string phrase)
+    {
+        var compact = new string(phrase.Where(char.IsLetterOrDigit).ToArray());
+        if (compact.Length is < 2 or > 6 || !compact.All(char.IsLetter))
+        {
+            return null;
+        }
+
+        var visibleLetters = phrase.Where(char.IsLetter).ToArray();
+        var looksLikeAcronym = visibleLetters.All(char.IsUpper) || phrase.Any(character => char.IsWhiteSpace(character) || character is '.' or '-' or '_');
+        if (!looksLikeAcronym)
+        {
+            return null;
+        }
+
+        return string.Join(' ', compact.ToUpperInvariant().ToCharArray());
+    }
+
+    private void StopTriggerRecognizer(SpeechRecognitionEngine? recognizer)
+    {
+        if (recognizer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            recognizer.RecognizeAsyncCancel();
+        }
+        catch
+        {
+        }
+
+        recognizer.SpeechRecognized -= OnTriggerSpeechRecognized;
+        recognizer.SpeechRecognitionRejected -= OnTriggerSpeechRejected;
+        recognizer.Dispose();
+    }
+
+    private void StopDictationRecognizer(SpeechRecognitionEngine? recognizer)
+    {
+        if (recognizer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            recognizer.RecognizeAsyncCancel();
+        }
+        catch
+        {
+        }
+
+        recognizer.SpeechHypothesized -= OnDictationSpeechHypothesized;
+        recognizer.SpeechRecognized -= OnDictationSpeechRecognized;
+        recognizer.SpeechRecognitionRejected -= OnDictationSpeechRejected;
+        recognizer.Dispose();
     }
 
     public void Dispose()
@@ -179,6 +279,7 @@ public sealed class SpeechRecognizerService : IDisposable
 
         _disposed = true;
         Stop();
-        _audioStream.Dispose();
+        _triggerAudioStream.Dispose();
+        _dictationAudioStream.Dispose();
     }
 }
