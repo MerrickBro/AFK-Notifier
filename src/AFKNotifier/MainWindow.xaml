@@ -4,7 +4,7 @@
         Title="AFK Notifier"
         Width="600"
         MinWidth="500"
-        MaxHeight="700"
+        MaxHeight="760"
         SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
         Background="#111318"
@@ -78,6 +78,48 @@
                     <TextBox x:Name="IntervalTextBox" Text="1.0"/>
                 </StackPanel>
             </Grid>
+
+            <Border Background="#181C23" BorderBrush="#303744" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Beep settings" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.2*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Idle beep" VerticalAlignment="Center" Foreground="#C7CDD7"/>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Pitch (Hz)" Margin="0,0,0,5" Foreground="#AAB2C0" FontSize="12"/>
+                            <TextBox x:Name="IdlePitchTextBox" Text="750"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4">
+                            <TextBlock Text="Volume (%)" Margin="0,0,0,5" Foreground="#AAB2C0" FontSize="12"/>
+                            <TextBox x:Name="IdleVolumeTextBox" Text="28"/>
+                        </StackPanel>
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.2*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Confirmation" VerticalAlignment="Center" Foreground="#C7CDD7"/>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Pitch (Hz)" Margin="0,0,0,5" Foreground="#AAB2C0" FontSize="12"/>
+                            <TextBox x:Name="ConfirmationPitchTextBox" Text="1000"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4">
+                            <TextBlock Text="Volume (%)" Margin="0,0,0,5" Foreground="#AAB2C0" FontSize="12"/>
+                            <TextBox x:Name="ConfirmationVolumeTextBox" Text="28"/>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Border>
 
             <Border Background="#181C23" BorderBrush="#303744" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,14">
                 <StackPanel>
