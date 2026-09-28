@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -33,13 +34,18 @@ public sealed class UpdateService
 
     public string CurrentVersionDisplay => $"{CurrentVersion.Major}.{CurrentVersion.Minor}.{Math.Max(0, CurrentVersion.Build)}";
 
+    public bool HasStagedUpdate => !string.IsNullOrWhiteSpace(_stagedDirectory) && Directory.Exists(_stagedDirectory);
+
     public async Task<UpdateInfo?> CheckForUpdateAsync(CancellationToken cancellationToken = default)
     {
         using var response = await _httpClient.GetAsync(LatestReleaseUrl, cancellationToken);
-        if (!response.IsSuccessStatusCode)
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
         {
-            return null;
+            throw new InvalidOperationException("No public GitHub release exists yet.");
         }
+
+        response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
@@ -58,7 +64,7 @@ public sealed class UpdateService
         var tagName = root.GetProperty("tag_name").GetString();
         if (string.IsNullOrWhiteSpace(tagName) || !TryParseVersion(tagName, out var latestVersion))
         {
-            return null;
+            throw new InvalidDataException("The latest GitHub release has an invalid version tag.");
         }
 
         if (latestVersion <= CurrentVersion)
@@ -81,7 +87,7 @@ public sealed class UpdateService
             }
         }
 
-        return null;
+        throw new InvalidDataException($"Release {tagName} does not contain {assetName}.");
     }
 
     public async Task StageUpdateAsync(UpdateInfo update, CancellationToken cancellationToken = default)
@@ -97,18 +103,33 @@ public sealed class UpdateService
 
         Directory.CreateDirectory(updateRoot);
 
-        await using (var source = await _httpClient.GetStreamAsync(update.DownloadUrl, cancellationToken))
-        await using (var destination = File.Create(archivePath))
+        using (var response = await _httpClient.GetAsync(update.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
         {
+            response.EnsureSuccessStatusCode();
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var destination = File.Create(archivePath);
             await source.CopyToAsync(destination, cancellationToken);
+        }
+
+        if (new FileInfo(archivePath).Length < 1024)
+        {
+            throw new InvalidDataException("The downloaded update archive is unexpectedly small.");
         }
 
         ZipFile.ExtractToDirectory(archivePath, extractPath, true);
 
-        if (!File.Exists(Path.Combine(extractPath, "AFKNotifier.exe")) ||
-            !File.Exists(Path.Combine(extractPath, "AFKNotifier.Updater.exe")))
+        var appExecutable = Path.Combine(extractPath, "AFKNotifier.exe");
+        var updaterExecutable = Path.Combine(extractPath, "AFKNotifier.Updater.exe");
+        var fontFile = Path.Combine(extractPath, "Fonts", "3270-Regular.ttf");
+
+        if (!File.Exists(appExecutable) || !File.Exists(updaterExecutable) || !File.Exists(fontFile))
         {
             throw new InvalidDataException("The downloaded update package is incomplete.");
+        }
+
+        if (new FileInfo(fontFile).Length < 10000)
+        {
+            throw new InvalidDataException("The downloaded update package contains an invalid font file.");
         }
 
         _stagedDirectory = extractPath;
@@ -116,7 +137,7 @@ public sealed class UpdateService
 
     public void TryLaunchPendingUpdate()
     {
-        if (string.IsNullOrWhiteSpace(_stagedDirectory) || !Directory.Exists(_stagedDirectory))
+        if (!HasStagedUpdate)
         {
             return;
         }
@@ -143,7 +164,7 @@ public sealed class UpdateService
             startInfo.ArgumentList.Add("--pid");
             startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
             startInfo.ArgumentList.Add("--source");
-            startInfo.ArgumentList.Add(_stagedDirectory);
+            startInfo.ArgumentList.Add(_stagedDirectory!);
             startInfo.ArgumentList.Add("--target");
             startInfo.ArgumentList.Add(installDirectory);
             startInfo.ArgumentList.Add("--exe");
