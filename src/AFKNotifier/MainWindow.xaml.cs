@@ -28,6 +28,10 @@ public partial class MainWindow : Window
         _settings = _settingsService.Load();
         TriggerTextBox.Text = _settings.TriggerPhrase;
         IntervalTextBox.Text = _settings.BeepIntervalSeconds.ToString("0.###");
+        IdleVolumeTextBox.Text = _settings.IdleBeepVolumePercent.ToString("0.##");
+        IdlePitchTextBox.Text = _settings.IdleBeepPitchHz.ToString("0.##");
+        ConfirmationVolumeTextBox.Text = _settings.ConfirmationBeepVolumePercent.ToString("0.##");
+        ConfirmationPitchTextBox.Text = _settings.ConfirmationBeepPitchHz.ToString("0.##");
         RefreshSelections();
     }
 
@@ -78,10 +82,33 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!double.TryParse(IntervalTextBox.Text, out var intervalSeconds) ||
-            intervalSeconds < 0.1 || intervalSeconds > 60)
+        if (!TryParseRange(IntervalTextBox.Text, 0.1, 60, out var intervalSeconds))
         {
             StatusTextBlock.Text = "Beep interval must be between 0.1 and 60 seconds.";
+            return;
+        }
+
+        if (!TryParseRange(IdleVolumeTextBox.Text, 0, 100, out var idleVolumePercent))
+        {
+            StatusTextBlock.Text = "Idle beep volume must be between 0 and 100%.";
+            return;
+        }
+
+        if (!TryParseRange(ConfirmationVolumeTextBox.Text, 0, 100, out var confirmationVolumePercent))
+        {
+            StatusTextBlock.Text = "Confirmation volume must be between 0 and 100%.";
+            return;
+        }
+
+        if (!TryParseRange(IdlePitchTextBox.Text, 50, 5000, out var idlePitchHz))
+        {
+            StatusTextBlock.Text = "Idle beep pitch must be between 50 and 5000 Hz.";
+            return;
+        }
+
+        if (!TryParseRange(ConfirmationPitchTextBox.Text, 50, 5000, out var confirmationPitchHz))
+        {
+            StatusTextBlock.Text = "Confirmation pitch must be between 50 and 5000 Hz.";
             return;
         }
 
@@ -93,7 +120,11 @@ public partial class MainWindow : Window
             ProcessName = application.ProcessName,
             OutputDeviceId = outputDevice.DeviceId,
             TriggerPhrase = triggerPhrase,
-            BeepIntervalSeconds = intervalSeconds
+            BeepIntervalSeconds = intervalSeconds,
+            IdleBeepVolumePercent = idleVolumePercent,
+            IdleBeepPitchHz = idlePitchHz,
+            ConfirmationBeepVolumePercent = confirmationVolumePercent,
+            ConfirmationBeepPitchHz = confirmationPitchHz
         };
         _settingsService.Save(_settings);
 
@@ -112,6 +143,8 @@ public partial class MainWindow : Window
             _alertTask = _notifierService.RunAlertAsync(
                 outputDevice.DeviceId,
                 TimeSpan.FromSeconds(intervalSeconds),
+                idlePitchHz,
+                idleVolumePercent / 100.0,
                 _alertCancellation.Token);
 
             StatusTextBlock.Text = $"Monitoring {application.ProcessName}. Waiting for \"{triggerPhrase}\".";
@@ -182,7 +215,10 @@ public partial class MainWindow : Window
 
             if (confirmed && outputDevice is not null)
             {
-                await _notifierService.PlayConfirmationAsync(outputDevice.DeviceId);
+                await _notifierService.PlayConfirmationAsync(
+                    outputDevice.DeviceId,
+                    _settings.ConfirmationBeepPitchHz,
+                    _settings.ConfirmationBeepVolumePercent / 100.0);
                 StatusTextBlock.Text = "AFK confirmed. Alert stopped.";
             }
             else if (!string.IsNullOrWhiteSpace(finalStatus))
@@ -210,5 +246,14 @@ public partial class MainWindow : Window
         OutputComboBox.IsEnabled = !monitoring;
         TriggerTextBox.IsEnabled = !monitoring;
         IntervalTextBox.IsEnabled = !monitoring;
+        IdleVolumeTextBox.IsEnabled = !monitoring;
+        IdlePitchTextBox.IsEnabled = !monitoring;
+        ConfirmationVolumeTextBox.IsEnabled = !monitoring;
+        ConfirmationPitchTextBox.IsEnabled = !monitoring;
+    }
+
+    private static bool TryParseRange(string text, double minimum, double maximum, out double value)
+    {
+        return double.TryParse(text, out value) && value >= minimum && value <= maximum;
     }
 }
