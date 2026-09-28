@@ -33,7 +33,6 @@ internal static class Program
 
             await using var input = Console.OpenStandardInput();
             var buffer = new byte[3200];
-            var lastPartial = string.Empty;
 
             while (true)
             {
@@ -56,18 +55,15 @@ internal static class Program
                         });
                     }
 
-                    lastPartial = string.Empty;
                     continue;
                 }
 
                 var partial = ParseResult(recognizer.PartialResult(), false);
-                if (string.IsNullOrWhiteSpace(partial.Text) ||
-                    partial.Text.Equals(lastPartial, StringComparison.OrdinalIgnoreCase))
+                if (string.IsNullOrWhiteSpace(partial.Text))
                 {
                     continue;
                 }
 
-                lastPartial = partial.Text;
                 WriteMessage(new
                 {
                     type = "partial",
