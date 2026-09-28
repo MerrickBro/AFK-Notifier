@@ -55,12 +55,12 @@ try {
     Copy-Item (Join-Path $updaterPublishDir 'AFKNotifier.Updater.exe') $publishDir -Force
 
     $fontDir = Join-Path $publishDir 'Fonts'
+    $fontPath = Join-Path $fontDir '3270-Regular.ttf'
     New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
-    try {
-        Invoke-WebRequest -Uri $fontUrl -OutFile (Join-Path $fontDir '3270-Regular.ttf') -UseBasicParsing
-    }
-    catch {
-        Remove-Item $fontDir -Recurse -Force -ErrorAction SilentlyContinue
+    Invoke-WebRequest -Uri $fontUrl -OutFile $fontPath -UseBasicParsing
+
+    if (-not (Test-Path $fontPath) -or (Get-Item $fontPath).Length -lt 10000) {
+        throw 'The About Me 3270 font could not be downloaded correctly.'
     }
 
     Get-Process AFKNotifier -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
