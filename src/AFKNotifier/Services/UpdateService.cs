@@ -120,9 +120,13 @@ public sealed class UpdateService
 
         var appExecutable = Path.Combine(extractPath, "AFKNotifier.exe");
         var updaterExecutable = Path.Combine(extractPath, "AFKNotifier.Updater.exe");
+        var recognizerExecutable = Path.Combine(extractPath, "RecognizerWorker", "AFKNotifier.RecognizerWorker.exe");
         var fontFile = Path.Combine(extractPath, "Fonts", "3270-Regular.ttf");
 
-        if (!File.Exists(appExecutable) || !File.Exists(updaterExecutable) || !File.Exists(fontFile))
+        if (!File.Exists(appExecutable) ||
+            !File.Exists(updaterExecutable) ||
+            !File.Exists(recognizerExecutable) ||
+            !File.Exists(fontFile))
         {
             throw new InvalidDataException("The downloaded update package is incomplete.");
         }
