@@ -2,19 +2,22 @@
 setlocal
 cd /d "%~dp0"
 
-echo AFK Notifier
+set DOTNET_NOLOGO=1
+set DOTNET_CLI_TELEMETRY_OPTOUT=1
+set DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
-echo Checking for .NET 10 SDK...
 where dotnet >nul 2>nul
 if errorlevel 1 goto missingDotnet
 
 dotnet --list-sdks | findstr /b "10." >nul
 if errorlevel 1 goto missingDotnet
 
-echo Starting AFK Notifier...
-dotnet run --project "src\AFKNotifier\AFKNotifier.csproj" --configuration Release
+echo Building AFK Notifier...
+dotnet build "src\AFKNotifier\AFKNotifier.csproj" --configuration Release --nologo --verbosity quiet
 if errorlevel 1 goto failed
 
+echo Starting AFK Notifier...
+start "" "src\AFKNotifier\bin\Release\net10.0-windows10.0.19041.0\AFKNotifier.exe"
 exit /b 0
 
 :missingDotnet
@@ -28,7 +31,7 @@ exit /b 1
 
 :failed
 echo.
-echo AFK Notifier could not start. Review the error above.
+echo AFK Notifier could not build. Review the error above.
 echo.
 pause
 exit /b 1
