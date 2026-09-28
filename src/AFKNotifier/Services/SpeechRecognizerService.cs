@@ -5,21 +5,32 @@ using AFKNotifier.Audio;
 
 namespace AFKNotifier.Services;
 
+public sealed record SpeechObservation(
+    string Text,
+    float Confidence,
+    string GrammarName,
+    bool IsFinal,
+    bool IsRejected);
+
 public sealed class SpeechRecognizerService : IDisposable
 {
+    private const string TriggerGrammarName = "Trigger";
+    private const string DictationGrammarName = "Dictation";
+
     private readonly string _triggerPhrase;
     private readonly float _minimumConfidence;
     private readonly BlockingAudioStream _audioStream = new();
     private SpeechRecognitionEngine? _recognizer;
     private bool _disposed;
 
-    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.55f)
+    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.68f)
     {
         _triggerPhrase = triggerPhrase;
         _minimumConfidence = minimumConfidence;
     }
 
     public event Action<string, float>? TriggerDetected;
+    public event Action<SpeechObservation>? SpeechObserved;
 
     public void Start()
     {
@@ -34,9 +45,12 @@ public sealed class SpeechRecognizerService : IDisposable
             ?? installedRecognizers.FirstOrDefault()
             ?? throw new InvalidOperationException("No Windows speech recognizer is installed.");
 
-        var recognizer = new SpeechRecognitionEngine(recognizerInfo);
-        var choices = new Choices(_triggerPhrase);
+        var recognizer = new SpeechRecognitionEngine(recognizerInfo)
+        {
+            MaxAlternates = 5
+        };
 
+        var choices = new Choices(_triggerPhrase);
         if (TriggerDetector.Matches("AFK", _triggerPhrase))
         {
             choices.Add("A F K");
@@ -48,8 +62,25 @@ public sealed class SpeechRecognizerService : IDisposable
         };
         grammarBuilder.Append(choices);
 
-        recognizer.LoadGrammar(new Grammar(grammarBuilder));
+        var triggerGrammar = new Grammar(grammarBuilder)
+        {
+            Name = TriggerGrammarName,
+            Priority = 10,
+            Weight = 1.0f
+        };
+
+        var dictationGrammar = new DictationGrammar
+        {
+            Name = DictationGrammarName,
+            Priority = 0,
+            Weight = 0.70f
+        };
+
+        recognizer.LoadGrammar(triggerGrammar);
+        recognizer.LoadGrammar(dictationGrammar);
+        recognizer.SpeechHypothesized += OnSpeechHypothesized;
         recognizer.SpeechRecognized += OnSpeechRecognized;
+        recognizer.SpeechRecognitionRejected += OnSpeechRecognitionRejected;
         recognizer.SetInputToAudioStream(
             _audioStream,
             new SpeechAudioFormatInfo(16000, AudioBitsPerSample.Sixteen, AudioChannel.Mono));
@@ -83,21 +114,60 @@ public sealed class SpeechRecognizerService : IDisposable
         {
         }
 
+        recognizer.SpeechHypothesized -= OnSpeechHypothesized;
         recognizer.SpeechRecognized -= OnSpeechRecognized;
+        recognizer.SpeechRecognitionRejected -= OnSpeechRecognitionRejected;
         recognizer.Dispose();
+    }
+
+    private void OnSpeechHypothesized(object? sender, SpeechHypothesizedEventArgs eventArgs)
+    {
+        var result = eventArgs.Result;
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result.Text,
+            result.Confidence,
+            result.Grammar?.Name ?? "Hypothesis",
+            false,
+            false));
     }
 
     private void OnSpeechRecognized(object? sender, SpeechRecognizedEventArgs eventArgs)
     {
-        if (eventArgs.Result.Confidence < _minimumConfidence)
+        var result = eventArgs.Result;
+        var grammarName = result.Grammar?.Name ?? "Unknown";
+
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result.Text,
+            result.Confidence,
+            grammarName,
+            true,
+            false));
+
+        if (!grammarName.Equals(TriggerGrammarName, StringComparison.Ordinal))
         {
             return;
         }
 
-        if (TriggerDetector.Matches(eventArgs.Result.Text, _triggerPhrase))
+        if (result.Confidence < _minimumConfidence)
         {
-            TriggerDetected?.Invoke(eventArgs.Result.Text, eventArgs.Result.Confidence);
+            return;
         }
+
+        if (TriggerDetector.Matches(result.Text, _triggerPhrase))
+        {
+            TriggerDetected?.Invoke(result.Text, result.Confidence);
+        }
+    }
+
+    private void OnSpeechRecognitionRejected(object? sender, SpeechRecognitionRejectedEventArgs eventArgs)
+    {
+        var result = eventArgs.Result;
+        SpeechObserved?.Invoke(new SpeechObservation(
+            result.Text,
+            result.Confidence,
+            result.Grammar?.Name ?? "Rejected",
+            true,
+            true));
     }
 
     public void Dispose()
