@@ -8,9 +8,11 @@ Add-Type -AssemblyName PresentationFramework
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectPath = Join-Path $repoRoot 'src\AFKNotifier\AFKNotifier.csproj'
 $updaterProjectPath = Join-Path $repoRoot 'src\AFKNotifier.Updater\AFKNotifier.Updater.csproj'
+$workerProjectPath = Join-Path $repoRoot 'src\AFKNotifier.RecognizerWorker\AFKNotifier.RecognizerWorker.csproj'
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\AFK Notifier'
 $publishDir = Join-Path $env:TEMP ('AFKNotifier_' + [guid]::NewGuid().ToString('N'))
 $updaterPublishDir = Join-Path $env:TEMP ('AFKNotifierUpdater_' + [guid]::NewGuid().ToString('N'))
+$workerPublishDir = Join-Path $env:TEMP ('AFKNotifierRecognizer_' + [guid]::NewGuid().ToString('N'))
 $startMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
 $shortcutPath = Join-Path $startMenuDir 'AFK Notifier.lnk'
 $fontUrl = 'https://merrickbro.org/fonts/3720/3270-Regular.ttf'
@@ -52,7 +54,22 @@ try {
         throw "Updater build failed.$([Environment]::NewLine)$details"
     }
 
+    $workerOutput = & dotnet publish $workerProjectPath --configuration Release --runtime win-x64 --self-contained true --output $workerPublishDir --nologo --verbosity quiet 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $details = ($workerOutput | Select-Object -Last 12) -join [Environment]::NewLine
+        throw "Recognizer worker build failed.$([Environment]::NewLine)$details"
+    }
+
     Copy-Item (Join-Path $updaterPublishDir 'AFKNotifier.Updater.exe') $publishDir -Force
+
+    $workerInstallDir = Join-Path $publishDir 'RecognizerWorker'
+    New-Item -ItemType Directory -Path $workerInstallDir -Force | Out-Null
+    Copy-Item (Join-Path $workerPublishDir '*') $workerInstallDir -Recurse -Force
+
+    $workerExe = Join-Path $workerInstallDir 'AFKNotifier.RecognizerWorker.exe'
+    if (-not (Test-Path $workerExe)) {
+        throw 'The speech recognition worker was not produced by the publish step.'
+    }
 
     $fontDir = Join-Path $publishDir 'Fonts'
     $fontPath = Join-Path $fontDir '3270-Regular.ttf'
@@ -64,6 +81,7 @@ try {
     }
 
     Get-Process AFKNotifier -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process 'AFKNotifier.RecognizerWorker' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     if (Test-Path $installDir) {
         Remove-Item $installDir -Recurse -Force
@@ -100,5 +118,8 @@ finally {
     }
     if (Test-Path $updaterPublishDir) {
         Remove-Item $updaterPublishDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $workerPublishDir) {
+        Remove-Item $workerPublishDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
