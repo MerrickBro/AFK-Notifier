@@ -302,8 +302,11 @@ public partial class MainWindow : Window
 
             SetDetection(
                 "LISTENING...",
-                $"WHISPER TINY.EN // TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // REQUIRES 2 MATCHING WINDOWS");
+                $"WHISPER TINY.EN // TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // FAST OVERLAP VERIFICATION");
             StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
+        }
+        catch (OperationCanceledException) when (_isStopping || _speechRecognizer is null)
+        {
         }
         catch (Exception exception)
         {
@@ -315,7 +318,16 @@ public partial class MainWindow : Window
 
     private async void StopButton_Click(object sender, RoutedEventArgs e)
     {
-        await StopMonitoringAsync(false);
+        try
+        {
+            await StopMonitoringAsync(false);
+        }
+        catch (Exception exception)
+        {
+            StatusTextBlock.Text = $"STOPPED // CLEANUP WARNING: {exception.Message}";
+            SetMonitoringState(false);
+            _isStopping = false;
+        }
     }
 
     private void OnAudioDataAvailable(byte[] audioData)
@@ -355,8 +367,10 @@ public partial class MainWindow : Window
             if (observation.MatchesTrigger)
             {
                 SetDetection(
-                    $"TRIGGER CANDIDATE {Math.Min(observation.TriggerConfirmations, 2)}/2: \"{text}\"",
-                    $"WHISPER TINY.EN // CONFIDENCE {observation.Confidence:P0} // NO-SPEECH {observation.NoSpeechProbability:P0}");
+                    $"TRIGGER HEARD: \"{text}\"",
+                    observation.TriggerConfirmations >= 2
+                        ? $"WHISPER TINY.EN // VERIFIED // CONFIDENCE {observation.Confidence:P0}"
+                        : $"WHISPER TINY.EN // VERIFYING OVERLAPPING AUDIO // CONFIDENCE {observation.Confidence:P0}");
                 return;
             }
 
@@ -372,7 +386,7 @@ public partial class MainWindow : Window
         {
             SetDetection(
                 $"TRIGGER CONFIRMED: \"{recognizedText.ToUpperInvariant()}\"",
-                $"WHISPER TINY.EN // 2/2 MATCHING WINDOWS // CONFIDENCE {confidence:P0}");
+                $"WHISPER TINY.EN // VERIFIED TRIGGER // CONFIDENCE {confidence:P0}");
             StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()} ({confidence:P0}).";
             await StopMonitoringAsync(true);
         }));
@@ -415,48 +429,108 @@ public partial class MainWindow : Window
         }
 
         _isStopping = true;
+        StopButton.IsEnabled = false;
+        StatusTextBlock.Text = confirmed ? "TRIGGER VERIFIED // STOPPING..." : "STOPPING...";
+
         var outputDevice = OutputComboBox.SelectedItem as AudioDeviceOption;
+        var cleanupWarnings = new List<string>();
+        var alertCancellation = _alertCancellation;
+        var alertTask = _alertTask;
+        var speechRecognizer = _speechRecognizer;
+
+        _alertCancellation = null;
+        _alertTask = null;
+        _speechRecognizer = null;
+
+        _captureService.AudioDataAvailable -= OnAudioDataAvailable;
+
+        if (speechRecognizer is not null)
+        {
+            speechRecognizer.TriggerDetected -= OnTriggerDetected;
+            speechRecognizer.SpeechObserved -= OnSpeechObserved;
+            speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
+        }
 
         try
         {
-            _alertCancellation?.Cancel();
-            await _captureService.StopAsync();
-            _captureService.AudioDataAvailable -= OnAudioDataAvailable;
+            try
+            {
+                alertCancellation?.Cancel();
+            }
+            catch (Exception exception)
+            {
+                cleanupWarnings.Add($"ALERT CANCEL: {exception.Message}");
+            }
 
-            var speechRecognizer = _speechRecognizer;
-            _speechRecognizer = null;
+            try
+            {
+                await _captureService.StopAsync();
+            }
+            catch (Exception exception)
+            {
+                cleanupWarnings.Add($"AUDIO CAPTURE: {exception.Message}");
+            }
 
             if (speechRecognizer is not null)
             {
-                speechRecognizer.TriggerDetected -= OnTriggerDetected;
-                speechRecognizer.SpeechObserved -= OnSpeechObserved;
-                speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
-                await speechRecognizer.StopAsync();
-                speechRecognizer.Dispose();
+                try
+                {
+                    await speechRecognizer.StopAsync();
+                }
+                catch (Exception exception)
+                {
+                    cleanupWarnings.Add($"TRANSCRIPTION: {exception.Message}");
+                }
+
+                try
+                {
+                    speechRecognizer.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    cleanupWarnings.Add($"TRANSCRIPTION DISPOSE: {exception.Message}");
+                }
             }
 
-            if (_alertTask is not null)
+            if (alertTask is not null)
             {
                 try
                 {
-                    await _alertTask;
+                    await alertTask;
                 }
                 catch (OperationCanceledException)
                 {
                 }
+                catch (Exception exception)
+                {
+                    cleanupWarnings.Add($"ALERT AUDIO: {exception.Message}");
+                }
             }
 
-            _alertTask = null;
-            _alertCancellation?.Dispose();
-            _alertCancellation = null;
+            try
+            {
+                alertCancellation?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                cleanupWarnings.Add($"ALERT DISPOSE: {exception.Message}");
+            }
 
             if (confirmed && outputDevice is not null)
             {
-                await _notifierService.PlayConfirmationAsync(
-                    outputDevice.DeviceId,
-                    _settings.ConfirmationBeepPitchHz,
-                    _settings.ConfirmationBeepVolumePercent / 100.0);
-                StatusTextBlock.Text = "AFK CONFIRMED // ALERT STOPPED.";
+                try
+                {
+                    await _notifierService.PlayConfirmationAsync(
+                        outputDevice.DeviceId,
+                        _settings.ConfirmationBeepPitchHz,
+                        _settings.ConfirmationBeepVolumePercent / 100.0);
+                    StatusTextBlock.Text = "AFK CONFIRMED // ALERT STOPPED.";
+                }
+                catch (Exception exception)
+                {
+                    cleanupWarnings.Add($"CONFIRMATION AUDIO: {exception.Message}");
+                    StatusTextBlock.Text = "AFK CONFIRMED // ALERT STOPPED // CONFIRMATION AUDIO FAILED.";
+                }
             }
             else if (!string.IsNullOrWhiteSpace(finalStatus))
             {
@@ -467,6 +541,11 @@ public partial class MainWindow : Window
                 StatusTextBlock.Text = "STOPPED.";
                 _detectionDetail = "MONITOR STOPPED // LAST WHISPER TRANSCRIPT SHOWN";
                 UpdateDetectionMeta();
+            }
+
+            if (cleanupWarnings.Count > 0 && !confirmed && string.IsNullOrWhiteSpace(finalStatus))
+            {
+                StatusTextBlock.Text = $"STOPPED // CLEANUP WARNING: {cleanupWarnings[0]}";
             }
         }
         finally
