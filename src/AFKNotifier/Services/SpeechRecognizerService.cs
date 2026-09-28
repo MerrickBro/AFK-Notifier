@@ -1,54 +1,51 @@
-using System.IO;
-using System.Net.Http;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Whisper.net;
+using System.Text.Json;
+using System.Threading.Channels;
 
 namespace AFKNotifier.Services;
 
 public sealed record SpeechObservation(
     string Text,
     float Confidence,
-    float NoSpeechProbability,
     bool MatchesTrigger,
-    int TriggerConfirmations,
+    bool TriggerVerified,
+    bool IsFinal,
     bool IsSpeech);
 
 public sealed class SpeechRecognizerService : IDisposable
 {
     private const int SampleRate = 16000;
-    private const int WindowSamples = SampleRate * 7 / 4;
-    private const int HopSamples = SampleRate / 2;
-    private const int MaxBufferedSamples = SampleRate * 3;
-    private const double MinimumAnalysisDbFs = -55;
-    private const float MinimumTranscriptProbability = 0.10f;
-    private const float MinimumTriggerProbability = 0.20f;
-    private const float StrongTriggerProbability = 0.50f;
-    private const float MaximumNoSpeechProbability = 0.70f;
-    private const float StrongTriggerMaximumNoSpeechProbability = 0.40f;
-    private const long MinimumModelBytes = 50_000_000;
-    private const string ModelDownloadUrl = "https://huggingface.co/sandrohanea/whisper.net/resolve/v5/classic/ggml-tiny.en.bin";
+    private const float StrongFinalConfidence = 0.55f;
 
-    private static readonly TimeSpan TriggerEvidenceWindow = TimeSpan.FromSeconds(2.2);
+    private static readonly TimeSpan PartialVerificationWindow = TimeSpan.FromMilliseconds(900);
     private static readonly string ModelPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "AFK Notifier",
         "Models",
-        "ggml-tiny.en.bin");
+        "vosk-model-small-en-us-0.15");
 
-    private readonly object _bufferLock = new();
-    private readonly object _stateLock = new();
-    private readonly SemaphoreSlim _stopGate = new(1, 1);
-    private readonly CancellationTokenSource _lifetimeCancellation = new();
-    private readonly List<float> _audioBuffer = [];
     private readonly string _triggerPhrase;
+    private readonly Channel<byte[]> _audioQueue = Channel.CreateBounded<byte[]>(
+        new BoundedChannelOptions(48)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.DropOldest
+        });
+    private readonly SemaphoreSlim _stopGate = new(1, 1);
 
-    private CancellationTokenSource? _processingCancellation;
-    private Task? _processingTask;
-    private WhisperFactory? _factory;
-    private int _samplesSinceLastAnalysis;
+    private CancellationTokenSource? _runCancellation;
+    private Process? _worker;
+    private Task? _writerTask;
+    private Task? _readerTask;
+    private Task? _errorReaderTask;
+    private TaskCompletionSource<bool>? _ready;
+    private string _lastTriggerText = string.Empty;
+    private DateTime _lastTriggerUtc = DateTime.MinValue;
     private int _triggerEvidence;
     private int _triggerRaised;
-    private DateTime _lastTriggerEvidenceUtc = DateTime.MinValue;
+    private int _stopping;
     private bool _disposed;
 
     public SpeechRecognizerService(string triggerPhrase)
@@ -59,6 +56,7 @@ public sealed class SpeechRecognizerService : IDisposable
     public event Action<string, float>? TriggerDetected;
     public event Action<SpeechObservation>? SpeechObserved;
     public event Action<double>? InputLevelUpdated;
+    public event Action<string>? RecognitionFaulted;
 
     public bool RequiresModelDownload => !IsModelValid();
 
@@ -66,78 +64,82 @@ public sealed class SpeechRecognizerService : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        lock (_stateLock)
+        if (_worker is not null)
         {
-            if (_processingTask is not null)
-            {
-                return;
-            }
+            return;
         }
 
-        using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            _lifetimeCancellation.Token);
-        var startupToken = startupCancellation.Token;
+        var workerPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "RecognizerWorker",
+            "AFKNotifier.RecognizerWorker.exe");
 
-        var modelPath = await EnsureModelAsync(startupToken);
-        startupToken.ThrowIfCancellationRequested();
-
-        var factory = WhisperFactory.FromPath(modelPath);
-
-        lock (_stateLock)
+        if (!File.Exists(workerPath))
         {
-            if (_lifetimeCancellation.IsCancellationRequested || _disposed)
-            {
-                factory.Dispose();
-                throw new OperationCanceledException(startupToken);
-            }
+            throw new FileNotFoundException("The speech recognition worker is missing.", workerPath);
+        }
 
-            _factory = factory;
-            _processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
-            _processingTask = Task.Run(() => ProcessingLoopAsync(_processingCancellation.Token));
+        var startInfo = new ProcessStartInfo(workerPath)
+        {
+            WorkingDirectory = Path.GetDirectoryName(workerPath)!,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        var worker = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+
+        if (!worker.Start())
+        {
+            worker.Dispose();
+            throw new InvalidOperationException("The speech recognition worker could not be started.");
+        }
+
+        _worker = worker;
+        _runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Interlocked.Exchange(ref _stopping, 0);
+
+        worker.Exited += OnWorkerExited;
+
+        var token = _runCancellation.Token;
+        _writerTask = Task.Run(() => WriteAudioAsync(worker, token), token);
+        _readerTask = Task.Run(() => ReadOutputAsync(worker, token), token);
+        _errorReaderTask = Task.Run(() => DrainErrorsAsync(worker, token), token);
+
+        try
+        {
+            await _ready.Task.WaitAsync(TimeSpan.FromMinutes(5), cancellationToken);
+        }
+        catch
+        {
+            await StopAsync();
+            throw;
         }
     }
 
     public void FeedAudio(ReadOnlySpan<byte> data)
     {
-        if (_lifetimeCancellation.IsCancellationRequested || data.Length < sizeof(short))
+        if (_disposed || Volatile.Read(ref _stopping) != 0 || data.Length < sizeof(short))
         {
             return;
-        }
-
-        lock (_stateLock)
-        {
-            if (_processingTask is null)
-            {
-                return;
-            }
         }
 
         var byteCount = data.Length - (data.Length % sizeof(short));
-        var pcm = MemoryMarshal.Cast<byte, short>(data[..byteCount]);
-        if (pcm.Length == 0)
+        var samples = MemoryMarshal.Cast<byte, short>(data[..byteCount]);
+        if (samples.Length == 0)
         {
             return;
         }
 
-        InputLevelUpdated?.Invoke(CalculateDbFs(pcm));
-
-        var samples = new float[pcm.Length];
-        for (var index = 0; index < pcm.Length; index++)
-        {
-            samples[index] = pcm[index] / 32768f;
-        }
-
-        lock (_bufferLock)
-        {
-            _audioBuffer.AddRange(samples);
-            _samplesSinceLastAnalysis += samples.Length;
-
-            if (_audioBuffer.Count > MaxBufferedSamples)
-            {
-                _audioBuffer.RemoveRange(0, _audioBuffer.Count - MaxBufferedSamples);
-            }
-        }
+        InputLevelUpdated?.Invoke(CalculateDbFs(samples));
+        _audioQueue.Writer.TryWrite(data[..byteCount].ToArray());
     }
 
     public async Task StopAsync()
@@ -146,57 +148,83 @@ public sealed class SpeechRecognizerService : IDisposable
 
         try
         {
-            if (!_lifetimeCancellation.IsCancellationRequested)
+            if (Interlocked.Exchange(ref _stopping, 1) != 0)
             {
-                _lifetimeCancellation.Cancel();
+                return;
             }
 
-            Task? processingTask;
-            CancellationTokenSource? processingCancellation;
+            var worker = _worker;
+            _worker = null;
 
-            lock (_stateLock)
+            _audioQueue.Writer.TryComplete();
+
+            try
             {
-                processingTask = _processingTask;
-                processingCancellation = _processingCancellation;
+                if (_writerTask is not null)
+                {
+                    await _writerTask.WaitAsync(TimeSpan.FromSeconds(1));
+                }
+            }
+            catch
+            {
             }
 
-            processingCancellation?.Cancel();
-
-            if (processingTask is not null)
+            if (worker is not null)
             {
                 try
                 {
-                    await processingTask;
+                    worker.StandardInput.Close();
                 }
-                catch (OperationCanceledException)
+                catch
                 {
                 }
-                catch (Exception) when (_lifetimeCancellation.IsCancellationRequested)
+
+                try
                 {
+                    await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(1));
+                }
+                catch
+                {
+                    try
+                    {
+                        if (!worker.HasExited)
+                        {
+                            worker.Kill(true);
+                        }
+                    }
+                    catch
+                    {
+                    }
                 }
             }
 
-            WhisperFactory? factory;
-
-            lock (_stateLock)
+            try
             {
-                _processingTask = null;
-                _processingCancellation = null;
-                factory = _factory;
-                _factory = null;
+                _runCancellation?.Cancel();
+            }
+            catch
+            {
             }
 
-            processingCancellation?.Dispose();
-            factory?.Dispose();
+            await IgnoreTaskFailureAsync(_readerTask);
+            await IgnoreTaskFailureAsync(_errorReaderTask);
+            await IgnoreTaskFailureAsync(_writerTask);
 
-            lock (_bufferLock)
+            if (worker is not null)
             {
-                _audioBuffer.Clear();
-                _samplesSinceLastAnalysis = 0;
+                worker.Exited -= OnWorkerExited;
+                worker.Dispose();
             }
 
+            _runCancellation?.Dispose();
+            _runCancellation = null;
+            _writerTask = null;
+            _readerTask = null;
+            _errorReaderTask = null;
+            _ready = null;
+            _lastTriggerText = string.Empty;
+            _lastTriggerUtc = DateTime.MinValue;
             _triggerEvidence = 0;
-            _lastTriggerEvidenceUtc = DateTime.MinValue;
             Interlocked.Exchange(ref _triggerRaised, 0);
         }
         finally
@@ -205,200 +233,200 @@ public sealed class SpeechRecognizerService : IDisposable
         }
     }
 
-    private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
+    private async Task WriteAudioAsync(Process worker, CancellationToken cancellationToken)
     {
-        WhisperFactory? factory;
-        lock (_stateLock)
+        try
         {
-            factory = _factory;
+            await foreach (var audio in _audioQueue.Reader.ReadAllAsync(cancellationToken))
+            {
+                await worker.StandardInput.BaseStream.WriteAsync(audio, cancellationToken);
+                await worker.StandardInput.BaseStream.FlushAsync(cancellationToken);
+            }
         }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (IOException) when (Volatile.Read(ref _stopping) != 0 || worker.HasExited)
+        {
+        }
+        catch (Exception exception)
+        {
+            ReportWorkerFault($"AUDIO PIPE FAILED: {exception.Message}");
+        }
+        finally
+        {
+            try
+            {
+                worker.StandardInput.Close();
+            }
+            catch
+            {
+            }
+        }
+    }
 
-        if (factory is null)
+    private async Task ReadOutputAsync(Process worker, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var line = await worker.StandardOutput.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                HandleWorkerMessage(line);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            ReportWorkerFault($"RECOGNIZER OUTPUT FAILED: {exception.Message}");
+        }
+    }
+
+    private async Task DrainErrorsAsync(Process worker, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested &&
+                   await worker.StandardError.ReadLineAsync(cancellationToken) is not null)
+            {
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+        }
+    }
+
+    private void HandleWorkerMessage(string line)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("type", out var typeElement))
+            {
+                return;
+            }
+
+            var type = typeElement.GetString();
+            if (type == "ready")
+            {
+                _ready?.TrySetResult(true);
+                return;
+            }
+
+            if (type == "error")
+            {
+                var message = root.TryGetProperty("message", out var messageElement)
+                    ? messageElement.GetString()
+                    : "Unknown speech worker error.";
+                _ready?.TrySetException(new InvalidOperationException(message));
+                ReportWorkerFault(message ?? "Unknown speech worker error.");
+                return;
+            }
+
+            if (type is not ("partial" or "final"))
+            {
+                return;
+            }
+
+            var text = root.TryGetProperty("text", out var textElement)
+                ? textElement.GetString()?.Trim() ?? string.Empty
+                : string.Empty;
+            var confidence = root.TryGetProperty("confidence", out var confidenceElement) &&
+                confidenceElement.TryGetSingle(out var parsedConfidence)
+                    ? parsedConfidence
+                    : 0f;
+
+            HandleRecognition(text, confidence, type == "final");
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    private void HandleRecognition(string text, float confidence, bool isFinal)
+    {
+        if (string.IsNullOrWhiteSpace(text))
         {
             return;
         }
 
-        using var processor = factory.CreateBuilder()
-            .WithLanguage("en")
-            .WithNoContext()
-            .WithSingleSegment()
-            .WithProbabilities()
-            .WithNoSpeechThreshold(MaximumNoSpeechProbability)
-            .Build();
+        var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase);
+        var verified = false;
 
-        while (!cancellationToken.IsCancellationRequested)
+        if (matchesTrigger)
         {
-            await Task.Delay(50, cancellationToken);
-
-            float[]? window = null;
-
-            lock (_bufferLock)
+            var now = DateTime.UtcNow;
+            if (text.Equals(_lastTriggerText, StringComparison.OrdinalIgnoreCase) &&
+                now - _lastTriggerUtc <= PartialVerificationWindow)
             {
-                if (_audioBuffer.Count >= WindowSamples && _samplesSinceLastAnalysis >= HopSamples)
-                {
-                    window = _audioBuffer
-                        .GetRange(_audioBuffer.Count - WindowSamples, WindowSamples)
-                        .ToArray();
-                    _samplesSinceLastAnalysis = 0;
-                }
-            }
-
-            if (window is null)
-            {
-                continue;
-            }
-
-            var windowDbFs = CalculateDbFs(window);
-            if (windowDbFs < MinimumAnalysisDbFs)
-            {
-                ExpireOldTriggerEvidence();
-                SpeechObserved?.Invoke(new SpeechObservation(
-                    string.Empty,
-                    0,
-                    1,
-                    false,
-                    _triggerEvidence,
-                    false));
-                continue;
-            }
-
-            var transcriptParts = new List<string>();
-            var probabilities = new List<float>();
-            var noSpeechProbabilities = new List<float>();
-
-            await foreach (var segment in processor.ProcessAsync(window, cancellationToken))
-            {
-                if (string.IsNullOrWhiteSpace(segment.Text) ||
-                    segment.Probability < MinimumTranscriptProbability ||
-                    segment.NoSpeechProbability > MaximumNoSpeechProbability)
-                {
-                    continue;
-                }
-
-                transcriptParts.Add(segment.Text.Trim());
-                probabilities.Add(segment.Probability);
-                noSpeechProbabilities.Add(segment.NoSpeechProbability);
-            }
-
-            if (transcriptParts.Count == 0)
-            {
-                ExpireOldTriggerEvidence();
-                SpeechObserved?.Invoke(new SpeechObservation(
-                    string.Empty,
-                    0,
-                    1,
-                    false,
-                    _triggerEvidence,
-                    false));
-                continue;
-            }
-
-            var text = string.Join(' ', transcriptParts).Trim();
-            var confidence = probabilities.Average();
-            var noSpeech = noSpeechProbabilities.Average();
-            var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase) &&
-                confidence >= MinimumTriggerProbability &&
-                noSpeech <= MaximumNoSpeechProbability;
-
-            var confirmed = false;
-
-            if (matchesTrigger)
-            {
-                var now = DateTime.UtcNow;
-                _triggerEvidence = now - _lastTriggerEvidenceUtc <= TriggerEvidenceWindow
-                    ? _triggerEvidence + 1
-                    : 1;
-                _lastTriggerEvidenceUtc = now;
-
-                var strongMatch = confidence >= StrongTriggerProbability &&
-                    noSpeech <= StrongTriggerMaximumNoSpeechProbability;
-                confirmed = strongMatch || _triggerEvidence >= 2;
+                _triggerEvidence++;
             }
             else
             {
-                ExpireOldTriggerEvidence();
+                _triggerEvidence = 1;
             }
 
-            SpeechObserved?.Invoke(new SpeechObservation(
-                text,
-                confidence,
-                noSpeech,
-                matchesTrigger,
-                confirmed ? 2 : Math.Min(_triggerEvidence, 1),
-                true));
+            _lastTriggerText = text;
+            _lastTriggerUtc = now;
 
-            if (confirmed && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
-            {
-                TriggerDetected?.Invoke(text, confidence);
-            }
+            verified = (isFinal && confidence >= StrongFinalConfidence) || _triggerEvidence >= 2;
         }
-    }
-
-    private void ExpireOldTriggerEvidence()
-    {
-        if (_triggerEvidence > 0 && DateTime.UtcNow - _lastTriggerEvidenceUtc > TriggerEvidenceWindow)
+        else if (DateTime.UtcNow - _lastTriggerUtc > PartialVerificationWindow)
         {
             _triggerEvidence = 0;
-            _lastTriggerEvidenceUtc = DateTime.MinValue;
+            _lastTriggerText = string.Empty;
+        }
+
+        SpeechObserved?.Invoke(new SpeechObservation(
+            text,
+            confidence,
+            matchesTrigger,
+            verified,
+            isFinal,
+            true));
+
+        if (verified && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
+        {
+            TriggerDetected?.Invoke(text, confidence);
         }
     }
 
-    private static async Task<string> EnsureModelAsync(CancellationToken cancellationToken)
+    private void OnWorkerExited(object? sender, EventArgs eventArgs)
     {
-        if (IsModelValid())
+        if (Volatile.Read(ref _stopping) != 0)
         {
-            return ModelPath;
+            return;
         }
 
-        var directory = Path.GetDirectoryName(ModelPath)!;
-        Directory.CreateDirectory(directory);
+        var exitCode = sender is Process process && process.HasExited ? process.ExitCode : -1;
+        var message = $"Speech worker exited unexpectedly (code {exitCode}).";
+        _ready?.TrySetException(new InvalidOperationException(message));
+        ReportWorkerFault(message);
+    }
 
-        var temporaryPath = ModelPath + ".download";
-        if (File.Exists(temporaryPath))
+    private void ReportWorkerFault(string message)
+    {
+        if (Volatile.Read(ref _stopping) == 0)
         {
-            File.Delete(temporaryPath);
-        }
-
-        try
-        {
-            using var httpClient = new HttpClient
-            {
-                Timeout = TimeSpan.FromMinutes(15)
-            };
-            using var response = await httpClient.GetAsync(
-                ModelDownloadUrl,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
-            await using (var destination = File.Create(temporaryPath))
-            {
-                await source.CopyToAsync(destination, cancellationToken);
-            }
-
-            if (new FileInfo(temporaryPath).Length < MinimumModelBytes)
-            {
-                throw new InvalidDataException("The downloaded Whisper model is incomplete.");
-            }
-
-            File.Move(temporaryPath, ModelPath, true);
-            return ModelPath;
-        }
-        catch
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-
-            throw;
+            RecognitionFaulted?.Invoke(message);
         }
     }
 
     private static bool IsModelValid()
     {
-        return File.Exists(ModelPath) && new FileInfo(ModelPath).Length >= MinimumModelBytes;
+        return File.Exists(Path.Combine(ModelPath, "am", "final.mdl")) &&
+            File.Exists(Path.Combine(ModelPath, "conf", "model.conf"));
     }
 
     private static double CalculateDbFs(ReadOnlySpan<short> samples)
@@ -415,33 +443,29 @@ public sealed class SpeechRecognizerService : IDisposable
             sumSquares += normalized * normalized;
         }
 
-        return RmsToDbFs(Math.Sqrt(sumSquares / samples.Length));
-    }
-
-    private static double CalculateDbFs(ReadOnlySpan<float> samples)
-    {
-        if (samples.Length == 0)
-        {
-            return -120;
-        }
-
-        double sumSquares = 0;
-        foreach (var sample in samples)
-        {
-            sumSquares += sample * sample;
-        }
-
-        return RmsToDbFs(Math.Sqrt(sumSquares / samples.Length));
-    }
-
-    private static double RmsToDbFs(double rms)
-    {
+        var rms = Math.Sqrt(sumSquares / samples.Length);
         if (rms <= 0.000001)
         {
             return -120;
         }
 
         return Math.Clamp(20.0 * Math.Log10(rms), -120, 0);
+    }
+
+    private static async Task IgnoreTaskFailureAsync(Task? task)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task;
+        }
+        catch
+        {
+        }
     }
 
     public void Dispose()
