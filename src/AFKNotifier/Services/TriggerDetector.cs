@@ -4,6 +4,37 @@ namespace AFKNotifier.Services;
 
 public static class TriggerDetector
 {
+    private static readonly Dictionary<string, string> SpokenLetterNames = new(StringComparer.Ordinal)
+    {
+        ["AY"] = "A",
+        ["BEE"] = "B",
+        ["SEE"] = "C",
+        ["SEA"] = "C",
+        ["DEE"] = "D",
+        ["EFF"] = "F",
+        ["GEE"] = "G",
+        ["AITCH"] = "H",
+        ["EYE"] = "I",
+        ["JAY"] = "J",
+        ["KAY"] = "K",
+        ["EL"] = "L",
+        ["EM"] = "M",
+        ["EN"] = "N",
+        ["OH"] = "O",
+        ["PEE"] = "P",
+        ["CUE"] = "Q",
+        ["QUEUE"] = "Q",
+        ["ARE"] = "R",
+        ["ESS"] = "S",
+        ["TEE"] = "T",
+        ["YOU"] = "U",
+        ["VEE"] = "V",
+        ["EX"] = "X",
+        ["WHY"] = "Y",
+        ["ZEE"] = "Z",
+        ["ZED"] = "Z"
+    };
+
     public static bool Matches(string recognizedText, string triggerPhrase)
     {
         var recognizedTokens = Tokenize(recognizedText);
@@ -19,39 +50,75 @@ public static class TriggerDetector
             return true;
         }
 
-        if (triggerTokens.Count == 1 && triggerTokens[0].Length is >= 2 and <= 8)
+        var triggerAcronym = GetAcronym(triggerTokens);
+        if (triggerAcronym is null)
         {
-            var acronym = triggerTokens[0];
-            for (var start = 0; start + acronym.Length <= recognizedTokens.Count; start++)
+            return false;
+        }
+
+        for (var start = 0; start < recognizedTokens.Count; start++)
+        {
+            var compact = new StringBuilder();
+
+            for (var index = start; index < recognizedTokens.Count && compact.Length <= triggerAcronym.Length; index++)
             {
-                var matchesSpelledOut = true;
-                for (var index = 0; index < acronym.Length; index++)
+                var normalized = NormalizeAcronymToken(recognizedTokens[index]);
+                if (normalized is null)
                 {
-                    var token = recognizedTokens[start + index];
-                    if (token.Length != 1 || token[0] != acronym[index])
-                    {
-                        matchesSpelledOut = false;
-                        break;
-                    }
+                    break;
                 }
 
-                if (matchesSpelledOut)
+                compact.Append(normalized);
+
+                if (compact.Length == triggerAcronym.Length &&
+                    compact.ToString().Equals(triggerAcronym, StringComparison.Ordinal))
                 {
                     return true;
                 }
-            }
-        }
 
-        if (triggerTokens.Count is >= 2 and <= 8 && triggerTokens.All(token => token.Length == 1))
-        {
-            var compactTrigger = string.Concat(triggerTokens);
-            if (recognizedTokens.Any(token => token.Equals(compactTrigger, StringComparison.Ordinal)))
-            {
-                return true;
+                if (!triggerAcronym.StartsWith(compact.ToString(), StringComparison.Ordinal))
+                {
+                    break;
+                }
             }
         }
 
         return false;
+    }
+
+    private static string? GetAcronym(IReadOnlyList<string> triggerTokens)
+    {
+        if (triggerTokens.Count == 1 && triggerTokens[0].Length is >= 2 and <= 8)
+        {
+            return triggerTokens[0];
+        }
+
+        if (triggerTokens.Count is >= 2 and <= 8 && triggerTokens.All(token => token.Length == 1))
+        {
+            return string.Concat(triggerTokens);
+        }
+
+        return null;
+    }
+
+    private static string? NormalizeAcronymToken(string token)
+    {
+        if (token.Length == 1 && char.IsLetterOrDigit(token[0]))
+        {
+            return token;
+        }
+
+        if (SpokenLetterNames.TryGetValue(token, out var letter))
+        {
+            return letter;
+        }
+
+        if (token.Length <= 8 && token.All(character => character is >= 'A' and <= 'Z'))
+        {
+            return token;
+        }
+
+        return null;
     }
 
     private static bool ContainsSequence(IReadOnlyList<string> source, IReadOnlyList<string> target)
