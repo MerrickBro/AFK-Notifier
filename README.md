@@ -2,6 +2,14 @@
 
 AFK Notifier is a Windows desktop utility that monitors audio from a selected application, repeatedly beeps through a configurable output device, and stops with a confirmation beep when it hears **AFK**.
 
+## Quick start
+
+1. Download or clone the repository.
+2. Make sure the .NET 10 SDK is installed.
+3. Double-click `AFK Notifier.bat` in the repository root.
+
+The launcher checks for the .NET 10 SDK, builds the application if needed, and starts AFK Notifier. If .NET 10 is missing, it opens the .NET 10 download page.
+
 ## What it does
 
 - Selects a running Windows application by process.
@@ -15,20 +23,15 @@ AFK Notifier is a Windows desktop utility that monitors audio from a selected ap
 ## Requirements
 
 - Windows 10 version 2004 / build 19041 or newer.
-- .NET 10 SDK to build from source.
+- .NET 10 SDK.
 - A Windows speech-recognition language installed for the trigger phrase.
 
-## Build
+## Manual build and run
 
 ```powershell
 dotnet restore
 dotnet build --configuration Release
-```
-
-Run the project with:
-
-```powershell
-dotnet run --project src/AFKNotifier/AFKNotifier.csproj
+dotnet run --project src/AFKNotifier/AFKNotifier.csproj --configuration Release
 ```
 
 ## Current defaults
