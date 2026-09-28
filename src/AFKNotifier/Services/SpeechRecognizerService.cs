@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Speech.AudioFormat;
 using System.Speech.Recognition;
 using AFKNotifier.Audio;
@@ -23,9 +24,10 @@ public sealed class SpeechRecognizerService : IDisposable
     private readonly BlockingAudioStream _dictationAudioStream = new();
     private SpeechRecognitionEngine? _triggerRecognizer;
     private SpeechRecognitionEngine? _dictationRecognizer;
+    private double _latestInputDbFs = -120;
     private bool _disposed;
 
-    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.62f)
+    public SpeechRecognizerService(string triggerPhrase, float minimumConfidence = 0.68f)
     {
         _triggerPhrase = triggerPhrase;
         _minimumConfidence = minimumConfidence;
@@ -59,6 +61,7 @@ public sealed class SpeechRecognizerService : IDisposable
 
     public void FeedAudio(ReadOnlySpan<byte> data)
     {
+        _latestInputDbFs = CalculateDbFs(data);
         _triggerAudioStream.Enqueue(data);
         _dictationAudioStream.Enqueue(data);
     }
@@ -147,7 +150,7 @@ public sealed class SpeechRecognizerService : IDisposable
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            TriggerGrammarName,
+            BuildSourceLabel(TriggerGrammarName),
             true,
             false));
 
@@ -173,7 +176,7 @@ public sealed class SpeechRecognizerService : IDisposable
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            TriggerGrammarName,
+            BuildSourceLabel(TriggerGrammarName),
             true,
             true));
     }
@@ -184,7 +187,7 @@ public sealed class SpeechRecognizerService : IDisposable
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            DictationGrammarName,
+            BuildSourceLabel(DictationGrammarName),
             false,
             false));
     }
@@ -195,7 +198,7 @@ public sealed class SpeechRecognizerService : IDisposable
         SpeechObserved?.Invoke(new SpeechObservation(
             result.Text,
             result.Confidence,
-            DictationGrammarName,
+            BuildSourceLabel(DictationGrammarName),
             true,
             false));
     }
@@ -206,9 +209,21 @@ public sealed class SpeechRecognizerService : IDisposable
         SpeechObserved?.Invoke(new SpeechObservation(
             result?.Text ?? string.Empty,
             result?.Confidence ?? 0,
-            DictationGrammarName,
+            BuildSourceLabel(DictationGrammarName),
             true,
             true));
+    }
+
+    private string BuildSourceLabel(string source)
+    {
+        var levelState = _latestInputDbFs switch
+        {
+            > -3 => "HOT",
+            < -48 => "LOW",
+            _ => "OK"
+        };
+
+        return $"{source} // INPUT {_latestInputDbFs:0} DBFS {levelState}";
     }
 
     private static string? GetSpelledAcronymVariant(string phrase)
@@ -227,6 +242,36 @@ public sealed class SpeechRecognizerService : IDisposable
         }
 
         return string.Join(' ', compact.ToUpperInvariant().ToCharArray());
+    }
+
+    private static double CalculateDbFs(ReadOnlySpan<byte> pcm16)
+    {
+        var byteCount = pcm16.Length - (pcm16.Length % sizeof(short));
+        if (byteCount <= 0)
+        {
+            return -120;
+        }
+
+        var samples = MemoryMarshal.Cast<byte, short>(pcm16[..byteCount]);
+        if (samples.Length == 0)
+        {
+            return -120;
+        }
+
+        double sumSquares = 0;
+        foreach (var sample in samples)
+        {
+            var normalized = sample / 32768.0;
+            sumSquares += normalized * normalized;
+        }
+
+        var rms = Math.Sqrt(sumSquares / samples.Length);
+        if (rms <= 0.000001)
+        {
+            return -120;
+        }
+
+        return Math.Clamp(20.0 * Math.Log10(rms), -120, 0);
     }
 
     private void StopTriggerRecognizer(SpeechRecognitionEngine? recognizer)
