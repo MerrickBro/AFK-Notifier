@@ -36,6 +36,9 @@ public sealed class SpeechRecognizerService : IDisposable
         "ggml-tiny.en.bin");
 
     private readonly object _bufferLock = new();
+    private readonly object _stateLock = new();
+    private readonly SemaphoreSlim _stopGate = new(1, 1);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly List<float> _audioBuffer = [];
     private readonly string _triggerPhrase;
 
@@ -63,23 +66,51 @@ public sealed class SpeechRecognizerService : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_processingTask is not null)
+        lock (_stateLock)
         {
-            return;
+            if (_processingTask is not null)
+            {
+                return;
+            }
         }
 
-        var modelPath = await EnsureModelAsync(cancellationToken);
-        _factory = WhisperFactory.FromPath(modelPath);
+        using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            _lifetimeCancellation.Token);
+        var startupToken = startupCancellation.Token;
 
-        _processingCancellation = new CancellationTokenSource();
-        _processingTask = Task.Run(() => ProcessingLoopAsync(_processingCancellation.Token));
+        var modelPath = await EnsureModelAsync(startupToken);
+        startupToken.ThrowIfCancellationRequested();
+
+        var factory = WhisperFactory.FromPath(modelPath);
+
+        lock (_stateLock)
+        {
+            if (_lifetimeCancellation.IsCancellationRequested || _disposed)
+            {
+                factory.Dispose();
+                throw new OperationCanceledException(startupToken);
+            }
+
+            _factory = factory;
+            _processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+            _processingTask = Task.Run(() => ProcessingLoopAsync(_processingCancellation.Token));
+        }
     }
 
     public void FeedAudio(ReadOnlySpan<byte> data)
     {
-        if (_processingTask is null || data.Length < sizeof(short))
+        if (_lifetimeCancellation.IsCancellationRequested || data.Length < sizeof(short))
         {
             return;
+        }
+
+        lock (_stateLock)
+        {
+            if (_processingTask is null)
+            {
+                return;
+            }
         }
 
         var byteCount = data.Length - (data.Length % sizeof(short));
@@ -111,47 +142,77 @@ public sealed class SpeechRecognizerService : IDisposable
 
     public async Task StopAsync()
     {
-        var cancellation = _processingCancellation;
-        var processingTask = _processingTask;
+        await _stopGate.WaitAsync();
 
-        _processingCancellation = null;
-        _processingTask = null;
-
-        if (cancellation is not null)
+        try
         {
-            cancellation.Cancel();
-        }
-
-        if (processingTask is not null)
-        {
-            try
+            if (!_lifetimeCancellation.IsCancellationRequested)
             {
-                await processingTask;
+                _lifetimeCancellation.Cancel();
             }
-            catch (OperationCanceledException)
+
+            Task? processingTask;
+            CancellationTokenSource? processingCancellation;
+
+            lock (_stateLock)
             {
+                processingTask = _processingTask;
+                processingCancellation = _processingCancellation;
             }
+
+            processingCancellation?.Cancel();
+
+            if (processingTask is not null)
+            {
+                try
+                {
+                    await processingTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception) when (_lifetimeCancellation.IsCancellationRequested)
+                {
+                }
+            }
+
+            WhisperFactory? factory;
+
+            lock (_stateLock)
+            {
+                _processingTask = null;
+                _processingCancellation = null;
+                factory = _factory;
+                _factory = null;
+            }
+
+            processingCancellation?.Dispose();
+            factory?.Dispose();
+
+            lock (_bufferLock)
+            {
+                _audioBuffer.Clear();
+                _samplesSinceLastAnalysis = 0;
+            }
+
+            _triggerEvidence = 0;
+            _lastTriggerEvidenceUtc = DateTime.MinValue;
+            Interlocked.Exchange(ref _triggerRaised, 0);
         }
-
-        cancellation?.Dispose();
-
-        _factory?.Dispose();
-        _factory = null;
-
-        lock (_bufferLock)
+        finally
         {
-            _audioBuffer.Clear();
-            _samplesSinceLastAnalysis = 0;
+            _stopGate.Release();
         }
-
-        _triggerEvidence = 0;
-        _lastTriggerEvidenceUtc = DateTime.MinValue;
-        Interlocked.Exchange(ref _triggerRaised, 0);
     }
 
     private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
     {
-        var factory = _factory;
+        WhisperFactory? factory;
+        lock (_stateLock)
+        {
+            factory = _factory;
+        }
+
         if (factory is null)
         {
             return;
@@ -391,6 +452,13 @@ public sealed class SpeechRecognizerService : IDisposable
         }
 
         _disposed = true;
-        StopAsync().GetAwaiter().GetResult();
+
+        try
+        {
+            StopAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+        }
     }
 }
