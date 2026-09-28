@@ -8,11 +8,17 @@ AFK Notifier is a Windows desktop utility that monitors audio from a selected ap
 2. Make sure the .NET 10 SDK is installed.
 3. Double-click `Install AFK Notifier.vbs`.
 
-The installer runs without a command window, publishes a self-contained Windows build to `%LOCALAPPDATA%\Programs\AFK Notifier`, adds **AFK Notifier** to the Windows Start menu, and launches it when installation finishes.
+The installer runs without a console window, publishes AFK Notifier into `%LOCALAPPDATA%\Programs\AFK Notifier`, creates a Windows Start Menu shortcut, installs the website-style font when available, and launches the app.
 
-After installation, use the Windows Start menu to open AFK Notifier. Opening it again while it is already running brings the existing window to the front instead of starting another copy.
+## Automatic updates
 
-`AFK Notifier.bat` remains available as a development/source-tree launcher, but is not needed for normal use after installation.
+Installed copies check the public GitHub Releases feed on startup. When a newer release exists, AFK Notifier downloads the matching `win-x64` or `win-arm64` package in the background. The update is staged while the app is running and automatically replaces the installed files after AFK Notifier closes, then relaunches the updated version.
+
+Every push to `main` is configured to build self-contained Windows packages and create a new GitHub Release with an automatically incremented `1.0.<run>` version. Anonymous update checks require this repository to be public.
+
+## Visual design
+
+The desktop UI follows the visual language of merrickbro.org: black monitor surfaces, light-blue `#b0e0ff` interface text and borders, green `#b0ffe0` accents, layered dark monitor-frame colors, and the same `3270` font when the installer can retrieve it from the website.
 
 ## What it does
 
@@ -20,31 +26,31 @@ After installation, use the Windows Start menu to open AFK Notifier. Opening it 
 - Captures only that process and its child-process audio through WASAPI process loopback.
 - Does not use the microphone.
 - Runs speech recognition locally through the Windows speech recognizer.
-- Repeats an alert beep through a selected playback device.
-- Stops the alert and plays a two-tone confirmation when `AFK` is recognized.
-- Saves the selected app name, output device, trigger phrase, beep interval, beep volumes, and beep pitches locally.
-- Runs as a single instance and brings the existing window forward when reopened.
+- Repeats a configurable idle beep through a selected playback device.
+- Lets you configure idle-beep pitch, idle-beep volume, confirmation pitch, confirmation volume, and beep interval.
+- Stops the alert and plays a two-tone confirmation when the trigger phrase is recognized.
+- Saves preferences locally.
+- Runs as a single instance; opening it again restores and brings the existing window to the front.
 
 ## Requirements
 
 - Windows 10 version 2004 / build 19041 or newer.
-- .NET 10 SDK for installing or building from source.
+- .NET 10 SDK for source installation/building.
 - A Windows speech-recognition language installed for the trigger phrase.
 
-## Manual build and run
+## Manual development run
 
 ```powershell
 dotnet restore
-dotnet build --configuration Release
 dotnet run --project src/AFKNotifier/AFKNotifier.csproj --configuration Release
 ```
 
 ## Current defaults
 
 - Trigger phrase: `AFK`
-- Idle beep: 750 Hz, 28% volume, 150 ms
+- Idle tone: 750 Hz, 28% volume, 150 ms
 - Alert interval: 1 second
-- Confirmation: 1000 Hz followed by a proportionally higher second tone, 28% volume
+- Confirmation: 1000 Hz followed by a second tone at 1.35x pitch, 28% volume
 
 ## Audio path
 
@@ -57,7 +63,7 @@ WASAPI process loopback
         v
 Windows speech recognition
         |
-        +---- AFK not detected ----> alert beep repeats
+        +---- AFK not detected ----> idle beep repeats
         |
         +---- AFK detected --------> stop alert -> confirmation tones
 ```

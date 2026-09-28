@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Windows;
+using AFKNotifier.Services;
 
 namespace AFKNotifier;
 
@@ -16,6 +17,8 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        ThemeFontService.ApplyWebsiteFont();
 
         _activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
         _instanceMutex = new Mutex(true, MutexName, out _ownsInstance);
@@ -84,6 +87,8 @@ public partial class App : Application
 
         _activationEvent?.Dispose();
         _instanceMutex?.Dispose();
+
+        UpdateService.Instance.TryLaunchPendingUpdate();
 
         base.OnExit(e);
     }

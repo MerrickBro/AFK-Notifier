@@ -7,10 +7,13 @@ Add-Type -AssemblyName PresentationFramework
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectPath = Join-Path $repoRoot 'src\AFKNotifier\AFKNotifier.csproj'
+$updaterProjectPath = Join-Path $repoRoot 'src\AFKNotifier.Updater\AFKNotifier.Updater.csproj'
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\AFK Notifier'
 $publishDir = Join-Path $env:TEMP ('AFKNotifier_' + [guid]::NewGuid().ToString('N'))
+$updaterPublishDir = Join-Path $env:TEMP ('AFKNotifierUpdater_' + [guid]::NewGuid().ToString('N'))
 $startMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
 $shortcutPath = Join-Path $startMenuDir 'AFK Notifier.lnk'
+$fontUrl = 'https://merrickbro.org/fonts/3720/3270-Regular.ttf'
 
 function ShowMessage($text, $title, $icon) {
     [System.Windows.MessageBox]::Show($text, $title, 'OK', $icon) | Out-Null
@@ -43,6 +46,23 @@ try {
         throw "Build failed.$([Environment]::NewLine)$details"
     }
 
+    $updaterOutput = & dotnet publish $updaterProjectPath --configuration Release --runtime $runtime --self-contained true --output $updaterPublishDir --nologo --verbosity quiet 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $details = ($updaterOutput | Select-Object -Last 12) -join [Environment]::NewLine
+        throw "Updater build failed.$([Environment]::NewLine)$details"
+    }
+
+    Copy-Item (Join-Path $updaterPublishDir 'AFKNotifier.Updater.exe') $publishDir -Force
+
+    $fontDir = Join-Path $publishDir 'Fonts'
+    New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
+    try {
+        Invoke-WebRequest -Uri $fontUrl -OutFile (Join-Path $fontDir '3270-Regular.ttf') -UseBasicParsing
+    }
+    catch {
+        Remove-Item $fontDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     Get-Process AFKNotifier -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     if (Test-Path $installDir) {
@@ -67,7 +87,7 @@ try {
     $shortcut.Save()
 
     Start-Process $exePath
-    ShowMessage 'AFK Notifier is installed. You can now launch it from the Windows Start menu.' 'AFK Notifier' 'Information'
+    ShowMessage 'AFK Notifier is installed. Future public GitHub releases will download automatically and apply when the app closes.' 'AFK Notifier' 'Information'
     exit 0
 }
 catch {
@@ -77,5 +97,8 @@ catch {
 finally {
     if (Test-Path $publishDir) {
         Remove-Item $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $updaterPublishDir) {
+        Remove-Item $updaterPublishDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 using AFKNotifier.Models;
 using AFKNotifier.Services;
 
@@ -12,6 +13,7 @@ public partial class MainWindow : Window
     private readonly ProcessAudioCaptureService _captureService = new();
     private readonly NotifierService _notifierService = new();
     private readonly SettingsService _settingsService = new();
+    private readonly UpdateService _updateService = UpdateService.Instance;
 
     private SpeechRecognizerService? _speechRecognizer;
     private CancellationTokenSource? _alertCancellation;
@@ -24,7 +26,7 @@ public partial class MainWindow : Window
         InitializeComponent();
     }
 
-    private void Window_Loaded(object sender, RoutedEventArgs e)
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         _settings = _settingsService.Load();
         TriggerTextBox.Text = _settings.TriggerPhrase;
@@ -33,7 +35,30 @@ public partial class MainWindow : Window
         IdlePitchTextBox.Text = _settings.IdleBeepPitchHz.ToString("0.##");
         ConfirmationVolumeTextBox.Text = _settings.ConfirmationBeepVolumePercent.ToString("0.##");
         ConfirmationPitchTextBox.Text = _settings.ConfirmationBeepPitchHz.ToString("0.##");
+        VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay}";
         RefreshSelections();
+        await CheckForUpdatesAsync();
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            var update = await _updateService.CheckForUpdateAsync();
+            if (update is null)
+            {
+                return;
+            }
+
+            VersionTextBlock.Text = $"V{update.Version} // DOWNLOADING";
+            await _updateService.StageUpdateAsync(update);
+            VersionTextBlock.Text = $"V{update.Version} // READY";
+            VersionTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(0xB0, 0xFF, 0xE0));
+        }
+        catch
+        {
+            VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay}";
+        }
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -84,55 +109,55 @@ public partial class MainWindow : Window
     {
         if (ApplicationComboBox.SelectedItem is not AudioProcessOption application)
         {
-            StatusTextBlock.Text = "Select an application to monitor.";
+            StatusTextBlock.Text = "SELECT AN APPLICATION TO MONITOR.";
             return;
         }
 
         if (OutputComboBox.SelectedItem is not AudioDeviceOption outputDevice)
         {
-            StatusTextBlock.Text = "Select an alert output device.";
+            StatusTextBlock.Text = "SELECT AN ALERT OUTPUT DEVICE.";
             return;
         }
 
         var triggerPhrase = TriggerTextBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(triggerPhrase))
         {
-            StatusTextBlock.Text = "Enter a trigger phrase.";
+            StatusTextBlock.Text = "ENTER A TRIGGER PHRASE.";
             return;
         }
 
         if (!TryParseRange(IntervalTextBox.Text, 0.1, 60, out var intervalSeconds))
         {
-            StatusTextBlock.Text = "Beep interval must be between 0.1 and 60 seconds.";
+            StatusTextBlock.Text = "BEEP INTERVAL MUST BE BETWEEN 0.1 AND 60 SECONDS.";
             return;
         }
 
         if (!TryParseRange(IdleVolumeTextBox.Text, 0, 100, out var idleVolumePercent))
         {
-            StatusTextBlock.Text = "Idle beep volume must be between 0 and 100%.";
+            StatusTextBlock.Text = "IDLE BEEP VOLUME MUST BE BETWEEN 0 AND 100%.";
             return;
         }
 
         if (!TryParseRange(ConfirmationVolumeTextBox.Text, 0, 100, out var confirmationVolumePercent))
         {
-            StatusTextBlock.Text = "Confirmation volume must be between 0 and 100%.";
+            StatusTextBlock.Text = "CONFIRMATION VOLUME MUST BE BETWEEN 0 AND 100%.";
             return;
         }
 
         if (!TryParseRange(IdlePitchTextBox.Text, 50, 5000, out var idlePitchHz))
         {
-            StatusTextBlock.Text = "Idle beep pitch must be between 50 and 5000 Hz.";
+            StatusTextBlock.Text = "IDLE BEEP PITCH MUST BE BETWEEN 50 AND 5000 HZ.";
             return;
         }
 
         if (!TryParseRange(ConfirmationPitchTextBox.Text, 50, 5000, out var confirmationPitchHz))
         {
-            StatusTextBlock.Text = "Confirmation pitch must be between 50 and 5000 Hz.";
+            StatusTextBlock.Text = "CONFIRMATION PITCH MUST BE BETWEEN 50 AND 5000 HZ.";
             return;
         }
 
         SetMonitoringState(true);
-        StatusTextBlock.Text = $"Starting monitor for {application.ProcessName}...";
+        StatusTextBlock.Text = $"STARTING MONITOR FOR {application.ProcessName.ToUpperInvariant()}...";
 
         _settings = new AppSettings
         {
@@ -149,12 +174,12 @@ public partial class MainWindow : Window
 
         try
         {
-            StatusTextBlock.Text = "Starting local speech recognition...";
+            StatusTextBlock.Text = "STARTING LOCAL SPEECH RECOGNITION...";
             _speechRecognizer = new SpeechRecognizerService(triggerPhrase);
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
             _speechRecognizer.Start();
 
-            StatusTextBlock.Text = $"Connecting to {application.ProcessName} audio...";
+            StatusTextBlock.Text = $"CONNECTING TO {application.ProcessName.ToUpperInvariant()} AUDIO...";
             _captureService.AudioDataAvailable += OnAudioDataAvailable;
             await _captureService.StartAsync(application.ProcessId);
 
@@ -166,11 +191,11 @@ public partial class MainWindow : Window
                 idleVolumePercent / 100.0,
                 _alertCancellation.Token);
 
-            StatusTextBlock.Text = $"Monitoring {application.ProcessName}. Waiting for \"{triggerPhrase}\".";
+            StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
         }
         catch (Exception exception)
         {
-            var error = $"Could not start ({exception.GetType().Name}): {exception.Message}";
+            var error = $"COULD NOT START ({exception.GetType().Name.ToUpperInvariant()}): {exception.Message}";
             await StopMonitoringAsync(false, error);
         }
     }
@@ -189,7 +214,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(new Action(async () =>
         {
-            StatusTextBlock.Text = $"Detected {recognizedText} ({confidence:P0}).";
+            StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()} ({confidence:P0}).";
             await StopMonitoringAsync(true);
         }));
     }
@@ -238,7 +263,7 @@ public partial class MainWindow : Window
                     outputDevice.DeviceId,
                     _settings.ConfirmationBeepPitchHz,
                     _settings.ConfirmationBeepVolumePercent / 100.0);
-                StatusTextBlock.Text = "AFK confirmed. Alert stopped.";
+                StatusTextBlock.Text = "AFK CONFIRMED // ALERT STOPPED.";
             }
             else if (!string.IsNullOrWhiteSpace(finalStatus))
             {
@@ -246,7 +271,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                StatusTextBlock.Text = "Stopped.";
+                StatusTextBlock.Text = "STOPPED.";
             }
         }
         finally

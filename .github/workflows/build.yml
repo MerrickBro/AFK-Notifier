@@ -1,17 +1,21 @@
-name: Build
+name: Build and Release
 
 on:
   push:
     branches:
       - main
-      - initial-build
-  pull_request:
-    branches:
-      - main
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        runtime:
+          - win-x64
+          - win-arm64
 
     steps:
       - name: Checkout
@@ -22,8 +26,58 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Restore
-        run: dotnet restore AFK-Notifier.sln
+      - name: Publish app
+        shell: pwsh
+        run: |
+          $version = "1.0.${{ github.run_number }}"
+          dotnet publish src/AFKNotifier/AFKNotifier.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output publish/app --nologo /p:Version=$version
 
-      - name: Build
-        run: dotnet build AFK-Notifier.sln --configuration Release --no-restore
+      - name: Publish updater
+        shell: pwsh
+        run: |
+          dotnet publish src/AFKNotifier.Updater/AFKNotifier.Updater.csproj --configuration Release --runtime ${{ matrix.runtime }} --self-contained true --output publish/updater --nologo
+          Copy-Item publish/updater/AFKNotifier.Updater.exe publish/app/AFKNotifier.Updater.exe -Force
+
+      - name: Add website font
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Path publish/app/Fonts -Force | Out-Null
+          Invoke-WebRequest -Uri "https://merrickbro.org/fonts/3720/3270-Regular.ttf" -OutFile publish/app/Fonts/3270-Regular.ttf -UseBasicParsing
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/app/* -DestinationPath AFK-Notifier-${{ matrix.runtime }}.zip -Force
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.runtime }}
+          path: AFK-Notifier-${{ matrix.runtime }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "1.0.${{ github.run_number }}"
+          $tag = "v$version"
+          gh release create $tag `
+            "artifacts/release-win-x64/AFK-Notifier-win-x64.zip" `
+            "artifacts/release-win-arm64/AFK-Notifier-win-arm64.zip" `
+            --repo "${{ github.repository }}" `
+            --target "${{ github.sha }}" `
+            --title "AFK Notifier $tag" `
+            --generate-notes
