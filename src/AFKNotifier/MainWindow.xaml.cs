@@ -264,8 +264,8 @@ public partial class MainWindow : Window
             BeepIntervalSeconds = intervalSeconds,
             IdleBeepVolumePercent = idleVolumePercent,
             IdleBeepPitchHz = idlePitchHz,
-            ConfirmationVolumePercent = confirmationVolumePercent,
-            ConfirmationPitchHz = confirmationPitchHz
+            ConfirmationBeepVolumePercent = confirmationVolumePercent,
+            ConfirmationBeepPitchHz = confirmationPitchHz
         };
         _settingsService.Save(_settings);
 
