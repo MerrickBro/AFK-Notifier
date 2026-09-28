@@ -22,7 +22,9 @@ public partial class MainWindow : Window
     private AppSettings _settings = new();
     private TextBlock? _detectionTextBlock;
     private TextBlock? _detectionMetaTextBlock;
-    private long _lastHypothesisTicks;
+    private string _detectionDetail = "LOCAL WINDOWS PHRASE SPOTTER";
+    private double _latestInputDbFs = -120;
+    private long _lastInputUiTicks;
     private bool _isStopping;
 
     public MainWindow()
@@ -61,7 +63,7 @@ public partial class MainWindow : Window
 
         _detectionMetaTextBlock = new TextBlock
         {
-            Text = "LOCAL WINDOWS SPEECH RECOGNITION",
+            Text = "LOCAL WINDOWS PHRASE SPOTTER",
             FontSize = 11,
             Opacity = 0.62,
             Margin = new Thickness(0, 2, 0, 0),
@@ -252,7 +254,7 @@ public partial class MainWindow : Window
 
         SetMonitoringState(true);
         StatusTextBlock.Text = $"STARTING MONITOR FOR {application.ProcessName.ToUpperInvariant()}...";
-        SetDetection("STARTING WINDOWS SPEECH ENGINE...", "WAITING FOR APPLICATION AUDIO");
+        SetDetection("STARTING WINDOWS PHRASE SPOTTER...", "WAITING FOR APPLICATION AUDIO");
 
         _settings = new AppSettings
         {
@@ -269,10 +271,11 @@ public partial class MainWindow : Window
 
         try
         {
-            StatusTextBlock.Text = "STARTING LOCAL SPEECH RECOGNITION...";
+            StatusTextBlock.Text = "STARTING LOCAL PHRASE RECOGNITION...";
             _speechRecognizer = new SpeechRecognizerService(triggerPhrase);
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
             _speechRecognizer.SpeechObserved += OnSpeechObserved;
+            _speechRecognizer.InputLevelUpdated += OnInputLevelUpdated;
             _speechRecognizer.Start();
 
             StatusTextBlock.Text = $"CONNECTING TO {application.ProcessName.ToUpperInvariant()} AUDIO...";
@@ -287,7 +290,7 @@ public partial class MainWindow : Window
                 idleVolumePercent / 100.0,
                 _alertCancellation.Token);
 
-            SetDetection("LISTENING...", $"TRIGGER: \"{triggerPhrase.ToUpperInvariant()}\" // MINIMUM CONFIDENCE 68%");
+            SetDetection("LISTENING FOR TRIGGER...", $"TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // MINIMUM CONFIDENCE 68%");
             StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
         }
         catch (Exception exception)
@@ -308,39 +311,38 @@ public partial class MainWindow : Window
         _speechRecognizer?.FeedAudio(audioData);
     }
 
-    private void OnSpeechObserved(SpeechObservation observation)
+    private void OnInputLevelUpdated(double dbFs)
     {
-        if (!observation.IsFinal)
+        _latestInputDbFs = dbFs;
+
+        var now = DateTime.UtcNow.Ticks;
+        var previous = Interlocked.Read(ref _lastInputUiTicks);
+        if (now - previous < TimeSpan.FromMilliseconds(150).Ticks)
         {
-            var now = DateTime.UtcNow.Ticks;
-            var previous = Interlocked.Read(ref _lastHypothesisTicks);
-            if (now - previous < TimeSpan.FromMilliseconds(120).Ticks)
-            {
-                return;
-            }
-            Interlocked.Exchange(ref _lastHypothesisTicks, now);
+            return;
         }
 
+        Interlocked.Exchange(ref _lastInputUiTicks, now);
+        Dispatcher.BeginInvoke(new Action(UpdateDetectionMeta));
+    }
+
+    private void OnSpeechObserved(SpeechObservation observation)
+    {
         Dispatcher.BeginInvoke(new Action(() =>
         {
+            if (observation.IsRejected)
+            {
+                SetDetection("NO TRIGGER MATCH", "PHRASE SPOTTER ACTIVE // MINIMUM CONFIDENCE 68%");
+                return;
+            }
+
             var text = string.IsNullOrWhiteSpace(observation.Text)
-                ? "(UNRESOLVED SPEECH)"
+                ? _settings.TriggerPhrase.ToUpperInvariant()
                 : observation.Text.Trim().ToUpperInvariant();
 
-            var prefix = observation.IsRejected
-                ? "REJECTED"
-                : observation.IsFinal
-                    ? "HEARD"
-                    : "HEARING";
-
-            var confidence = observation.Confidence > 0
-                ? $"{observation.Confidence:P0}"
-                : "--";
-
-            var state = observation.IsFinal ? "FINAL" : "LIVE";
             SetDetection(
-                $"{prefix}: \"{text}\"",
-                $"{observation.GrammarName.ToUpperInvariant()} // CONFIDENCE {confidence} // {state}");
+                $"CANDIDATE: \"{text}\"",
+                $"CANDIDATE CONFIDENCE {observation.Confidence:P0} // NEED 68%");
         }));
     }
 
@@ -356,17 +358,33 @@ public partial class MainWindow : Window
         }));
     }
 
-    private void SetDetection(string text, string meta)
+    private void SetDetection(string text, string detail)
     {
+        _detectionDetail = detail;
+
         if (_detectionTextBlock is not null)
         {
             _detectionTextBlock.Text = text;
         }
 
-        if (_detectionMetaTextBlock is not null)
+        UpdateDetectionMeta();
+    }
+
+    private void UpdateDetectionMeta()
+    {
+        if (_detectionMetaTextBlock is null)
         {
-            _detectionMetaTextBlock.Text = meta;
+            return;
         }
+
+        var levelState = _latestInputDbFs switch
+        {
+            > -3 => "HOT",
+            < -48 => "LOW",
+            _ => "OK"
+        };
+
+        _detectionMetaTextBlock.Text = $"{_detectionDetail} // INPUT {_latestInputDbFs:0} DBFS {levelState}";
     }
 
     private async Task StopMonitoringAsync(bool confirmed, string? finalStatus = null)
@@ -389,6 +407,7 @@ public partial class MainWindow : Window
             {
                 _speechRecognizer.TriggerDetected -= OnTriggerDetected;
                 _speechRecognizer.SpeechObserved -= OnSpeechObserved;
+                _speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
                 _speechRecognizer.Dispose();
                 _speechRecognizer = null;
             }
@@ -423,10 +442,8 @@ public partial class MainWindow : Window
             else
             {
                 StatusTextBlock.Text = "STOPPED.";
-                if (_detectionMetaTextBlock is not null)
-                {
-                    _detectionMetaTextBlock.Text = "MONITOR STOPPED // LAST WINDOWS RESULT SHOWN";
-                }
+                _detectionDetail = "MONITOR STOPPED // LAST PHRASE-SPOTTER RESULT SHOWN";
+                UpdateDetectionMeta();
             }
         }
         finally
