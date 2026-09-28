@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media;
 
@@ -8,11 +7,7 @@ namespace AFKNotifier.Services;
 
 public static class ThemeFontService
 {
-    private const uint FrPrivate = 0x10;
     private const string FontFamilyName = "IBM 3270";
-
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern int AddFontResourceEx(string fileName, uint flags, IntPtr reserved);
 
     public static void ApplyWebsiteFont()
     {
@@ -27,10 +22,9 @@ public static class ThemeFontService
 
         try
         {
-            var loadedFonts = AddFontResourceEx(fontPath, FrPrivate, IntPtr.Zero);
-            Application.Current.Resources["AppFontFamily"] = loadedFonts > 0
-                ? new FontFamily(FontFamilyName)
-                : fallback;
+            var fontDirectory = Path.GetDirectoryName(fontPath)! + Path.DirectorySeparatorChar;
+            var fontDirectoryUri = new Uri(fontDirectory, UriKind.Absolute);
+            Application.Current.Resources["AppFontFamily"] = new FontFamily(fontDirectoryUri, $"./#{FontFamilyName}");
         }
         catch
         {
