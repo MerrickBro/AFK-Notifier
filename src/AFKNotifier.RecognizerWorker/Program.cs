@@ -32,11 +32,11 @@ internal static class Program
             WriteMessage(new { type = "ready" });
 
             await using var input = Console.OpenStandardInput();
-            var buffer = new byte[3200];
+            var buffer = new byte[1600];
 
             while (true)
             {
-                var bytesRead = await input.ReadAsync(buffer);
+                var bytesRead = await input.ReadAsync(buffer.AsMemory());
                 if (bytesRead <= 0)
                 {
                     break;
