@@ -15,7 +15,6 @@ public sealed record SpeechObservation(
 
 public sealed class SpeechRecognizerService : IDisposable
 {
-    private const int SampleRate = 16000;
     private const float StrongFinalConfidence = 0.55f;
 
     private static readonly TimeSpan PartialVerificationWindow = TimeSpan.FromMilliseconds(900);
@@ -27,7 +26,7 @@ public sealed class SpeechRecognizerService : IDisposable
 
     private readonly string _triggerPhrase;
     private readonly Channel<byte[]> _audioQueue = Channel.CreateBounded<byte[]>(
-        new BoundedChannelOptions(48)
+        new BoundedChannelOptions(12)
         {
             SingleReader = true,
             SingleWriter = false,
@@ -42,6 +41,7 @@ public sealed class SpeechRecognizerService : IDisposable
     private Task? _errorReaderTask;
     private TaskCompletionSource<bool>? _ready;
     private string _lastTriggerText = string.Empty;
+    private string _lastPublishedText = string.Empty;
     private DateTime _lastTriggerUtc = DateTime.MinValue;
     private int _triggerEvidence;
     private int _triggerRaised;
@@ -223,6 +223,7 @@ public sealed class SpeechRecognizerService : IDisposable
             _errorReaderTask = null;
             _ready = null;
             _lastTriggerText = string.Empty;
+            _lastPublishedText = string.Empty;
             _lastTriggerUtc = DateTime.MinValue;
             _triggerEvidence = 0;
             Interlocked.Exchange(ref _triggerRaised, 0);
@@ -239,8 +240,7 @@ public sealed class SpeechRecognizerService : IDisposable
         {
             await foreach (var audio in _audioQueue.Reader.ReadAllAsync(cancellationToken))
             {
-                await worker.StandardInput.BaseStream.WriteAsync(audio, cancellationToken);
-                await worker.StandardInput.BaseStream.FlushAsync(cancellationToken);
+                await worker.StandardInput.BaseStream.WriteAsync(audio.AsMemory(), cancellationToken);
             }
         }
         catch (OperationCanceledException)
@@ -388,13 +388,21 @@ public sealed class SpeechRecognizerService : IDisposable
             _lastTriggerText = string.Empty;
         }
 
-        SpeechObserved?.Invoke(new SpeechObservation(
-            text,
-            confidence,
-            matchesTrigger,
-            verified,
-            isFinal,
-            true));
+        var shouldPublish = isFinal ||
+            matchesTrigger ||
+            !text.Equals(_lastPublishedText, StringComparison.OrdinalIgnoreCase);
+
+        if (shouldPublish)
+        {
+            _lastPublishedText = text;
+            SpeechObserved?.Invoke(new SpeechObservation(
+                text,
+                confidence,
+                matchesTrigger,
+                verified,
+                isFinal,
+                true));
+        }
 
         if (verified && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
         {
