@@ -22,7 +22,7 @@ public partial class MainWindow : Window
     private AppSettings _settings = new();
     private TextBlock? _detectionTextBlock;
     private TextBlock? _detectionMetaTextBlock;
-    private string _detectionDetail = "LOCAL WHISPER TRANSCRIPTION";
+    private string _detectionDetail = "LOCAL STREAMING TRANSCRIPTION";
     private double _latestInputDbFs = -120;
     private long _lastInputUiTicks;
     private bool _isStopping;
@@ -63,7 +63,7 @@ public partial class MainWindow : Window
 
         _detectionMetaTextBlock = new TextBlock
         {
-            Text = "LOCAL WHISPER TRANSCRIPTION",
+            Text = "LOCAL STREAMING TRANSCRIPTION",
             FontSize = 11,
             Opacity = 0.62,
             Margin = new Thickness(0, 2, 0, 0),
@@ -254,7 +254,7 @@ public partial class MainWindow : Window
 
         SetMonitoringState(true);
         StatusTextBlock.Text = $"STARTING MONITOR FOR {application.ProcessName.ToUpperInvariant()}...";
-        SetDetection("STARTING LOCAL TRANSCRIPTION...", "WHISPER TINY.EN // WAITING FOR MODEL");
+        SetDetection("STARTING STREAMING RECOGNITION...", "VOSK SMALL EN-US // WAITING FOR MODEL");
 
         _settings = new AppSettings
         {
@@ -264,8 +264,8 @@ public partial class MainWindow : Window
             BeepIntervalSeconds = intervalSeconds,
             IdleBeepVolumePercent = idleVolumePercent,
             IdleBeepPitchHz = idlePitchHz,
-            ConfirmationBeepVolumePercent = confirmationVolumePercent,
-            ConfirmationBeepPitchHz = confirmationPitchHz
+            ConfirmationVolumePercent = confirmationVolumePercent,
+            ConfirmationPitchHz = confirmationPitchHz
         };
         _settingsService.Save(_settings);
 
@@ -275,15 +275,16 @@ public partial class MainWindow : Window
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
             _speechRecognizer.SpeechObserved += OnSpeechObserved;
             _speechRecognizer.InputLevelUpdated += OnInputLevelUpdated;
+            _speechRecognizer.RecognitionFaulted += OnRecognitionFaulted;
 
             if (_speechRecognizer.RequiresModelDownload)
             {
-                StatusTextBlock.Text = "DOWNLOADING LOCAL WHISPER MODEL // FIRST RUN ONLY...";
-                SetDetection("DOWNLOADING SPEECH MODEL...", "WHISPER TINY.EN // STORED LOCALLY AFTER DOWNLOAD");
+                StatusTextBlock.Text = "DOWNLOADING LOCAL VOSK MODEL // FIRST RUN ONLY...";
+                SetDetection("DOWNLOADING SPEECH MODEL...", "VOSK SMALL EN-US // STORED LOCALLY AFTER DOWNLOAD");
             }
             else
             {
-                StatusTextBlock.Text = "STARTING LOCAL WHISPER TRANSCRIPTION...";
+                StatusTextBlock.Text = "STARTING LOCAL STREAMING RECOGNITION...";
             }
 
             await _speechRecognizer.StartAsync();
@@ -302,7 +303,7 @@ public partial class MainWindow : Window
 
             SetDetection(
                 "LISTENING...",
-                $"WHISPER TINY.EN // TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // FAST OVERLAP VERIFICATION");
+                $"VOSK STREAMING // TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // LIVE PARTIAL RESULTS");
             StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
         }
         catch (OperationCanceledException) when (_isStopping || _speechRecognizer is null)
@@ -356,9 +357,6 @@ public partial class MainWindow : Window
         {
             if (!observation.IsSpeech || string.IsNullOrWhiteSpace(observation.Text))
             {
-                SetDetection(
-                    "NO SPEECH TRANSCRIBED",
-                    $"WHISPER TINY.EN // NO-SPEECH {observation.NoSpeechProbability:P0}");
                 return;
             }
 
@@ -368,15 +366,28 @@ public partial class MainWindow : Window
             {
                 SetDetection(
                     $"TRIGGER HEARD: \"{text}\"",
-                    observation.TriggerConfirmations >= 2
-                        ? $"WHISPER TINY.EN // VERIFIED // CONFIDENCE {observation.Confidence:P0}"
-                        : $"WHISPER TINY.EN // VERIFYING OVERLAPPING AUDIO // CONFIDENCE {observation.Confidence:P0}");
+                    observation.TriggerVerified
+                        ? "VOSK STREAMING // VERIFIED"
+                        : "VOSK STREAMING // VERIFYING LIVE PARTIAL RESULT");
                 return;
             }
 
-            SetDetection(
-                $"HEARD: \"{text}\"",
-                $"WHISPER TINY.EN // CONFIDENCE {observation.Confidence:P0} // NO-SPEECH {observation.NoSpeechProbability:P0}");
+            var detail = observation.IsFinal
+                ? observation.Confidence > 0
+                    ? $"VOSK STREAMING // FINAL // CONFIDENCE {observation.Confidence:P0}"
+                    : "VOSK STREAMING // FINAL"
+                : "VOSK STREAMING // LIVE PARTIAL";
+
+            SetDetection($"HEARD: \"{text}\"", detail);
+        }));
+    }
+
+    private void OnRecognitionFaulted(string message)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            SetDetection("RECOGNIZER WORKER STOPPED", message.ToUpperInvariant());
+            StatusTextBlock.Text = "SPEECH RECOGNIZER FAILED // AFK NOTIFIER REMAINS RUNNING // STOP AND START TO RETRY.";
         }));
     }
 
@@ -386,8 +397,10 @@ public partial class MainWindow : Window
         {
             SetDetection(
                 $"TRIGGER CONFIRMED: \"{recognizedText.ToUpperInvariant()}\"",
-                $"WHISPER TINY.EN // VERIFIED TRIGGER // CONFIDENCE {confidence:P0}");
-            StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()} ({confidence:P0}).";
+                confidence > 0
+                    ? $"VOSK STREAMING // VERIFIED TRIGGER // CONFIDENCE {confidence:P0}"
+                    : "VOSK STREAMING // VERIFIED LIVE TRIGGER");
+            StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()}.";
             await StopMonitoringAsync(true);
         }));
     }
@@ -449,6 +462,7 @@ public partial class MainWindow : Window
             speechRecognizer.TriggerDetected -= OnTriggerDetected;
             speechRecognizer.SpeechObserved -= OnSpeechObserved;
             speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
+            speechRecognizer.RecognitionFaulted -= OnRecognitionFaulted;
         }
 
         try
@@ -539,7 +553,7 @@ public partial class MainWindow : Window
             else
             {
                 StatusTextBlock.Text = "STOPPED.";
-                _detectionDetail = "MONITOR STOPPED // LAST WHISPER TRANSCRIPT SHOWN";
+                _detectionDetail = "MONITOR STOPPED // LAST STREAMING TRANSCRIPT SHOWN";
                 UpdateDetectionMeta();
             }
 
