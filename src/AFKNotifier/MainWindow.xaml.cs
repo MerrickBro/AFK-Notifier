@@ -116,8 +116,9 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            StatusTextBlock.Text = $"Could not start: {exception.Message}";
+            var errorMessage = $"Could not start: {exception.Message}";
             await StopMonitoringAsync(false);
+            StatusTextBlock.Text = errorMessage;
         }
     }
 
