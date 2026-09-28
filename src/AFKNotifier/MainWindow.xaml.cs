@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using AFKNotifier.Models;
@@ -19,14 +20,70 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _alertCancellation;
     private Task? _alertTask;
     private AppSettings _settings = new();
+    private TextBlock? _detectionTextBlock;
+    private TextBlock? _detectionMetaTextBlock;
+    private long _lastHypothesisTicks;
     private bool _isStopping;
 
     public MainWindow()
     {
         InitializeComponent();
+        InstallDetectionPanel();
         VersionTextBlock.Cursor = Cursors.Hand;
         VersionTextBlock.ToolTip = "Click to check for updates";
         VersionTextBlock.MouseLeftButtonUp += VersionTextBlock_MouseLeftButtonUp;
+    }
+
+    private void InstallDetectionPanel()
+    {
+        if (StartButton.Parent is not StackPanel buttonRow || buttonRow.Parent is not Grid contentGrid)
+        {
+            return;
+        }
+
+        var accentBrush = (Brush)FindResource("AccentBrush");
+
+        var header = new TextBlock
+        {
+            Text = "> WINDOWS DETECTION",
+            Foreground = accentBrush,
+            FontSize = 13,
+            Margin = new Thickness(0, 0, 0, 3)
+        };
+
+        _detectionTextBlock = new TextBlock
+        {
+            Text = "WAITING FOR MONITOR...",
+            FontSize = 15,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap
+        };
+
+        _detectionMetaTextBlock = new TextBlock
+        {
+            Text = "LOCAL WINDOWS SPEECH RECOGNITION",
+            FontSize = 11,
+            Opacity = 0.62,
+            Margin = new Thickness(0, 2, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap
+        };
+
+        var stack = new StackPanel();
+        stack.Children.Add(header);
+        stack.Children.Add(_detectionTextBlock);
+        stack.Children.Add(_detectionMetaTextBlock);
+
+        var panel = new Border
+        {
+            Style = (Style)FindResource("SectionBorderStyle"),
+            Padding = new Thickness(9, 7, 9, 7),
+            Margin = new Thickness(0, 0, 0, 9),
+            Child = stack
+        };
+
+        Grid.SetRow(panel, 8);
+        contentGrid.Children.Add(panel);
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -195,6 +252,7 @@ public partial class MainWindow : Window
 
         SetMonitoringState(true);
         StatusTextBlock.Text = $"STARTING MONITOR FOR {application.ProcessName.ToUpperInvariant()}...";
+        SetDetection("STARTING WINDOWS SPEECH ENGINE...", "WAITING FOR APPLICATION AUDIO");
 
         _settings = new AppSettings
         {
@@ -214,6 +272,7 @@ public partial class MainWindow : Window
             StatusTextBlock.Text = "STARTING LOCAL SPEECH RECOGNITION...";
             _speechRecognizer = new SpeechRecognizerService(triggerPhrase);
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
+            _speechRecognizer.SpeechObserved += OnSpeechObserved;
             _speechRecognizer.Start();
 
             StatusTextBlock.Text = $"CONNECTING TO {application.ProcessName.ToUpperInvariant()} AUDIO...";
@@ -228,11 +287,13 @@ public partial class MainWindow : Window
                 idleVolumePercent / 100.0,
                 _alertCancellation.Token);
 
+            SetDetection("LISTENING...", $"TRIGGER: \"{triggerPhrase.ToUpperInvariant()}\" // MINIMUM CONFIDENCE 68%");
             StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
         }
         catch (Exception exception)
         {
             var error = $"COULD NOT START ({exception.GetType().Name.ToUpperInvariant()}): {exception.Message}";
+            SetDetection("DETECTION UNAVAILABLE", exception.Message.ToUpperInvariant());
             await StopMonitoringAsync(false, error);
         }
     }
@@ -247,13 +308,65 @@ public partial class MainWindow : Window
         _speechRecognizer?.FeedAudio(audioData);
     }
 
+    private void OnSpeechObserved(SpeechObservation observation)
+    {
+        if (!observation.IsFinal)
+        {
+            var now = DateTime.UtcNow.Ticks;
+            var previous = Interlocked.Read(ref _lastHypothesisTicks);
+            if (now - previous < TimeSpan.FromMilliseconds(120).Ticks)
+            {
+                return;
+            }
+            Interlocked.Exchange(ref _lastHypothesisTicks, now);
+        }
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var text = string.IsNullOrWhiteSpace(observation.Text)
+                ? "(UNRESOLVED SPEECH)"
+                : observation.Text.Trim().ToUpperInvariant();
+
+            var prefix = observation.IsRejected
+                ? "REJECTED"
+                : observation.IsFinal
+                    ? "HEARD"
+                    : "HEARING";
+
+            var confidence = observation.Confidence > 0
+                ? $"{observation.Confidence:P0}"
+                : "--";
+
+            var state = observation.IsFinal ? "FINAL" : "LIVE";
+            SetDetection(
+                $"{prefix}: \"{text}\"",
+                $"{observation.GrammarName.ToUpperInvariant()} // CONFIDENCE {confidence} // {state}");
+        }));
+    }
+
     private void OnTriggerDetected(string recognizedText, float confidence)
     {
         Dispatcher.BeginInvoke(new Action(async () =>
         {
+            SetDetection(
+                $"TRIGGER: \"{recognizedText.ToUpperInvariant()}\"",
+                $"ACCEPTED // CONFIDENCE {confidence:P0}");
             StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()} ({confidence:P0}).";
             await StopMonitoringAsync(true);
         }));
+    }
+
+    private void SetDetection(string text, string meta)
+    {
+        if (_detectionTextBlock is not null)
+        {
+            _detectionTextBlock.Text = text;
+        }
+
+        if (_detectionMetaTextBlock is not null)
+        {
+            _detectionMetaTextBlock.Text = meta;
+        }
     }
 
     private async Task StopMonitoringAsync(bool confirmed, string? finalStatus = null)
@@ -275,6 +388,7 @@ public partial class MainWindow : Window
             if (_speechRecognizer is not null)
             {
                 _speechRecognizer.TriggerDetected -= OnTriggerDetected;
+                _speechRecognizer.SpeechObserved -= OnSpeechObserved;
                 _speechRecognizer.Dispose();
                 _speechRecognizer = null;
             }
@@ -309,6 +423,10 @@ public partial class MainWindow : Window
             else
             {
                 StatusTextBlock.Text = "STOPPED.";
+                if (_detectionMetaTextBlock is not null)
+                {
+                    _detectionMetaTextBlock.Text = "MONITOR STOPPED // LAST WINDOWS RESULT SHOWN";
+                }
             }
         }
         finally
