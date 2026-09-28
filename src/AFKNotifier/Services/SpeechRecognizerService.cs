@@ -151,6 +151,20 @@ public sealed class SpeechRecognizerService : IDisposable
 
     private async Task ProcessingLoopAsync(CancellationToken cancellationToken)
     {
+        var factory = _factory;
+        if (factory is null)
+        {
+            return;
+        }
+
+        using var processor = factory.CreateBuilder()
+            .WithLanguage("en")
+            .WithNoContext()
+            .WithSingleSegment()
+            .WithProbabilities()
+            .WithNoSpeechThreshold(MaximumNoSpeechProbability)
+            .Build();
+
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(50, cancellationToken);
@@ -187,94 +201,75 @@ public sealed class SpeechRecognizerService : IDisposable
                 continue;
             }
 
-            await AnalyzeWindowAsync(window, cancellationToken);
-        }
-    }
+            var transcriptParts = new List<string>();
+            var probabilities = new List<float>();
+            var noSpeechProbabilities = new List<float>();
 
-    private async Task AnalyzeWindowAsync(float[] samples, CancellationToken cancellationToken)
-    {
-        var factory = _factory;
-        if (factory is null)
-        {
-            return;
-        }
-
-        using var processor = factory.CreateBuilder()
-            .WithLanguage("en")
-            .WithNoContext()
-            .WithSingleSegment()
-            .WithProbabilities()
-            .WithNoSpeechThreshold(MaximumNoSpeechProbability)
-            .Build();
-
-        var transcriptParts = new List<string>();
-        var probabilities = new List<float>();
-        var noSpeechProbabilities = new List<float>();
-
-        await foreach (var segment in processor.ProcessAsync(samples, cancellationToken))
-        {
-            if (string.IsNullOrWhiteSpace(segment.Text) ||
-                segment.Probability < MinimumTranscriptProbability ||
-                segment.NoSpeechProbability > MaximumNoSpeechProbability)
+            await foreach (var segment in processor.ProcessAsync(window, cancellationToken))
             {
+                if (string.IsNullOrWhiteSpace(segment.Text) ||
+                    segment.Probability < MinimumTranscriptProbability ||
+                    segment.NoSpeechProbability > MaximumNoSpeechProbability)
+                {
+                    continue;
+                }
+
+                transcriptParts.Add(segment.Text.Trim());
+                probabilities.Add(segment.Probability);
+                noSpeechProbabilities.Add(segment.NoSpeechProbability);
+            }
+
+            if (transcriptParts.Count == 0)
+            {
+                ExpireOldTriggerEvidence();
+                SpeechObserved?.Invoke(new SpeechObservation(
+                    string.Empty,
+                    0,
+                    1,
+                    false,
+                    _triggerEvidence,
+                    false));
                 continue;
             }
 
-            transcriptParts.Add(segment.Text.Trim());
-            probabilities.Add(segment.Probability);
-            noSpeechProbabilities.Add(segment.NoSpeechProbability);
-        }
+            var text = string.Join(' ', transcriptParts).Trim();
+            var confidence = probabilities.Average();
+            var noSpeech = noSpeechProbabilities.Average();
+            var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase) &&
+                confidence >= MinimumTriggerProbability &&
+                noSpeech <= MaximumNoSpeechProbability;
 
-        if (transcriptParts.Count == 0)
-        {
-            ExpireOldTriggerEvidence();
+            var confirmed = false;
+
+            if (matchesTrigger)
+            {
+                var now = DateTime.UtcNow;
+                _triggerEvidence = now - _lastTriggerEvidenceUtc <= TriggerEvidenceWindow
+                    ? _triggerEvidence + 1
+                    : 1;
+                _lastTriggerEvidenceUtc = now;
+
+                var strongMatch = confidence >= StrongTriggerProbability &&
+                    noSpeech <= StrongTriggerMaximumNoSpeechProbability;
+                confirmed = strongMatch || _triggerEvidence >= 2;
+            }
+            else
+            {
+                ExpireOldTriggerEvidence();
+            }
+
             SpeechObserved?.Invoke(new SpeechObservation(
-                string.Empty,
-                0,
-                1,
-                false,
-                _triggerEvidence,
-                false));
-            return;
-        }
+                text,
+                confidence,
+                noSpeech,
+                matchesTrigger,
+                confirmed ? 2 : Math.Min(_triggerEvidence, 1),
+                true));
 
-        var text = string.Join(' ', transcriptParts).Trim();
-        var confidence = probabilities.Average();
-        var noSpeech = noSpeechProbabilities.Average();
-        var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase) &&
-            confidence >= MinimumTriggerProbability &&
-            noSpeech <= MaximumNoSpeechProbability;
-
-        var confirmed = false;
-
-        if (matchesTrigger)
-        {
-            var now = DateTime.UtcNow;
-            _triggerEvidence = now - _lastTriggerEvidenceUtc <= TriggerEvidenceWindow
-                ? _triggerEvidence + 1
-                : 1;
-            _lastTriggerEvidenceUtc = now;
-
-            var strongMatch = confidence >= StrongTriggerProbability &&
-                noSpeech <= StrongTriggerMaximumNoSpeechProbability;
-            confirmed = strongMatch || _triggerEvidence >= 2;
-        }
-        else
-        {
-            ExpireOldTriggerEvidence();
-        }
-
-        SpeechObserved?.Invoke(new SpeechObservation(
-            text,
-            confidence,
-            noSpeech,
-            matchesTrigger,
-            confirmed ? 2 : Math.Min(_triggerEvidence, 1),
-            true));
-
-        if (confirmed && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
-        {
-            TriggerDetected?.Invoke(text, confidence);
+            if (confirmed && Interlocked.Exchange(ref _triggerRaised, 1) == 0)
+            {
+                TriggerDetected?.Invoke(text, confidence);
+            }
         }
     }
 
