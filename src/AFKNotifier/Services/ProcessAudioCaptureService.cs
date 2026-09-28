@@ -1,3 +1,4 @@
+using AFKNotifier.Audio;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
@@ -6,6 +7,7 @@ namespace AFKNotifier.Services;
 public sealed class ProcessAudioCaptureService
 {
     private WasapiRecorder? _recorder;
+    private FloatStereoToPcm16MonoResampler? _resampler;
 
     public event Action<byte[]>? AudioDataAvailable;
 
@@ -13,15 +15,19 @@ public sealed class ProcessAudioCaptureService
     {
         await StopAsync();
 
+        _resampler = new FloatStereoToPcm16MonoResampler();
         _recorder = await new WasapiRecorderBuilder()
             .WithProcessLoopback((uint)processId, ProcessLoopbackMode.IncludeTargetProcessTree)
-            .WithFormat(new WaveFormat(16000, 16, 1))
             .WithBufferLength(50)
             .BuildAsync();
 
         _recorder.DataAvailable += (buffer, _, _, _) =>
         {
-            AudioDataAvailable?.Invoke(buffer.ToArray());
+            var converted = _resampler?.Convert(buffer);
+            if (converted is { Length: > 0 })
+            {
+                AudioDataAvailable?.Invoke(converted);
+            }
         };
 
         _recorder.StartRecording();
@@ -31,6 +37,7 @@ public sealed class ProcessAudioCaptureService
     {
         var recorder = _recorder;
         _recorder = null;
+        _resampler = null;
 
         if (recorder is null)
         {

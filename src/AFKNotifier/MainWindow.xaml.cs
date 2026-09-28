@@ -99,10 +99,12 @@ public partial class MainWindow : Window
 
         try
         {
+            StatusTextBlock.Text = "Starting local speech recognition...";
             _speechRecognizer = new SpeechRecognizerService(triggerPhrase);
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
             _speechRecognizer.Start();
 
+            StatusTextBlock.Text = $"Connecting to {application.ProcessName} audio...";
             _captureService.AudioDataAvailable += OnAudioDataAvailable;
             await _captureService.StartAsync(application.ProcessId);
 
@@ -116,9 +118,8 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            var errorMessage = $"Could not start: {exception.Message}";
-            await StopMonitoringAsync(false);
-            StatusTextBlock.Text = errorMessage;
+            var error = $"Could not start ({exception.GetType().Name}): {exception.Message}";
+            await StopMonitoringAsync(false, error);
         }
     }
 
@@ -141,7 +142,7 @@ public partial class MainWindow : Window
         }));
     }
 
-    private async Task StopMonitoringAsync(bool confirmed)
+    private async Task StopMonitoringAsync(bool confirmed, string? finalStatus = null)
     {
         if (_isStopping)
         {
@@ -184,7 +185,11 @@ public partial class MainWindow : Window
                 await _notifierService.PlayConfirmationAsync(outputDevice.DeviceId);
                 StatusTextBlock.Text = "AFK confirmed. Alert stopped.";
             }
-            else if (!confirmed)
+            else if (!string.IsNullOrWhiteSpace(finalStatus))
+            {
+                StatusTextBlock.Text = finalStatus;
+            }
+            else
             {
                 StatusTextBlock.Text = "Stopped.";
             }

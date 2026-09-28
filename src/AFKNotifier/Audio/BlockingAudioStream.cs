@@ -37,14 +37,17 @@ public sealed class BlockingAudioStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        while (true)
+        var written = 0;
+
+        while (written < count)
         {
             if (_currentBuffer is not null && _currentOffset < _currentBuffer.Length)
             {
-                var bytesToCopy = Math.Min(count, _currentBuffer.Length - _currentOffset);
-                Array.Copy(_currentBuffer, _currentOffset, buffer, offset, bytesToCopy);
+                var bytesToCopy = Math.Min(count - written, _currentBuffer.Length - _currentOffset);
+                Array.Copy(_currentBuffer, _currentOffset, buffer, offset + written, bytesToCopy);
                 _currentOffset += bytesToCopy;
-                return bytesToCopy;
+                written += bytesToCopy;
+                continue;
             }
 
             _currentBuffer = null;
@@ -52,7 +55,7 @@ public sealed class BlockingAudioStream : Stream
 
             if (_buffers.IsCompleted)
             {
-                return 0;
+                return written;
             }
 
             try
@@ -61,9 +64,11 @@ public sealed class BlockingAudioStream : Stream
             }
             catch (InvalidOperationException)
             {
-                return 0;
+                return written;
             }
         }
+
+        return count;
     }
 
     protected override void Dispose(bool disposing)
@@ -81,19 +86,22 @@ public sealed class BlockingAudioStream : Stream
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
-    public override long Length => throw new NotSupportedException();
+    public override long Length => -1;
 
     public override long Position
     {
-        get => throw new NotSupportedException();
-        set => throw new NotSupportedException();
+        get => 0;
+        set { }
     }
 
     public override void Flush()
     {
     }
 
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-    public override void SetLength(long value) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin) => 0;
+    public override void SetLength(long value)
+    {
+    }
+
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
