@@ -1,6 +1,6 @@
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using Whisper.net;
-using Whisper.net.Ggml;
 
 namespace AFKNotifier.Services;
 
@@ -24,6 +24,7 @@ public sealed class SpeechRecognizerService : IDisposable
     private const float MinimumTriggerProbability = 0.30f;
     private const float MaximumNoSpeechProbability = 0.65f;
     private const long MinimumModelBytes = 50_000_000;
+    private const string ModelDownloadUrl = "https://huggingface.co/sandrohanea/whisper.net/resolve/v5/classic/ggml-tiny.en.bin";
 
     private static readonly string ModelPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -38,7 +39,6 @@ public sealed class SpeechRecognizerService : IDisposable
     private CancellationTokenSource? _processingCancellation;
     private Task? _processingTask;
     private WhisperFactory? _factory;
-    private WhisperProcessor? _processor;
     private int _samplesSinceLastAnalysis;
     private int _consecutiveTriggerMatches;
     private int _triggerRaised;
@@ -65,15 +65,7 @@ public sealed class SpeechRecognizerService : IDisposable
         }
 
         var modelPath = await EnsureModelAsync(cancellationToken);
-
         _factory = WhisperFactory.FromPath(modelPath);
-        _processor = _factory.CreateBuilder()
-            .WithLanguage("en")
-            .WithNoContext()
-            .WithSingleSegment()
-            .WithProbabilities()
-            .WithNoSpeechThreshold(0.60f)
-            .Build();
 
         _processingCancellation = new CancellationTokenSource();
         _processingTask = Task.Run(() => ProcessingLoopAsync(_processingCancellation.Token));
@@ -139,8 +131,6 @@ public sealed class SpeechRecognizerService : IDisposable
 
         cancellation?.Dispose();
 
-        _processor?.Dispose();
-        _processor = null;
         _factory?.Dispose();
         _factory = null;
 
@@ -198,47 +188,54 @@ public sealed class SpeechRecognizerService : IDisposable
 
     private async Task AnalyzeWindowAsync(float[] samples, CancellationToken cancellationToken)
     {
-        var processor = _processor;
-        if (processor is null)
+        var factory = _factory;
+        if (factory is null)
         {
             return;
         }
 
-        var segments = new List<SegmentData>();
+        using var processor = factory.CreateBuilder()
+            .WithLanguage("en")
+            .WithNoContext()
+            .WithSingleSegment()
+            .WithProbabilities()
+            .WithNoSpeechThreshold(0.60f)
+            .Build();
+
+        var transcriptParts = new List<string>();
+        var probabilities = new List<float>();
+        var noSpeechProbabilities = new List<float>();
+
         await foreach (var segment in processor.ProcessAsync(samples, cancellationToken))
         {
-            if (!string.IsNullOrWhiteSpace(segment.Text))
+            if (string.IsNullOrWhiteSpace(segment.Text) ||
+                segment.Probability < MinimumTranscriptProbability ||
+                segment.NoSpeechProbability > MaximumNoSpeechProbability)
             {
-                segments.Add(segment);
+                continue;
             }
+
+            transcriptParts.Add(segment.Text.Trim());
+            probabilities.Add(segment.Probability);
+            noSpeechProbabilities.Add(segment.NoSpeechProbability);
         }
 
-        var usableSegments = segments
-            .Where(segment =>
-                segment.Probability >= MinimumTranscriptProbability &&
-                segment.NoSpeechProbability <= MaximumNoSpeechProbability)
-            .ToArray();
-
-        if (usableSegments.Length == 0)
+        if (transcriptParts.Count == 0)
         {
             _consecutiveTriggerMatches = 0;
-            var noSpeechProbability = segments.Count == 0
-                ? 1f
-                : segments.Average(segment => segment.NoSpeechProbability);
-
             SpeechObserved?.Invoke(new SpeechObservation(
                 string.Empty,
                 0,
-                noSpeechProbability,
+                1,
                 false,
                 0,
                 false));
             return;
         }
 
-        var text = string.Join(' ', usableSegments.Select(segment => segment.Text.Trim())).Trim();
-        var confidence = usableSegments.Average(segment => segment.Probability);
-        var noSpeech = usableSegments.Average(segment => segment.NoSpeechProbability);
+        var text = string.Join(' ', transcriptParts).Trim();
+        var confidence = probabilities.Average();
+        var noSpeech = noSpeechProbabilities.Average();
         var matchesTrigger = TriggerDetector.Matches(text, _triggerPhrase) &&
             confidence >= MinimumTriggerProbability &&
             noSpeech <= MaximumNoSpeechProbability;
@@ -286,10 +283,20 @@ public sealed class SpeechRecognizerService : IDisposable
 
         try
         {
-            using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(GgmlType.TinyEn);
-            await using (var fileStream = File.Create(temporaryPath))
+            using var httpClient = new HttpClient
             {
-                await modelStream.CopyToAsync(fileStream, cancellationToken);
+                Timeout = TimeSpan.FromMinutes(15)
+            };
+            using var response = await httpClient.GetAsync(
+                ModelDownloadUrl,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellationToken))
+            await using (var destination = File.Create(temporaryPath))
+            {
+                await source.CopyToAsync(destination, cancellationToken);
             }
 
             if (new FileInfo(temporaryPath).Length < MinimumModelBytes)
