@@ -22,7 +22,7 @@ public partial class MainWindow : Window
     private AppSettings _settings = new();
     private TextBlock? _detectionTextBlock;
     private TextBlock? _detectionMetaTextBlock;
-    private string _detectionDetail = "LOCAL WINDOWS PHRASE SPOTTER";
+    private string _detectionDetail = "LOCAL WHISPER TRANSCRIPTION";
     private double _latestInputDbFs = -120;
     private long _lastInputUiTicks;
     private bool _isStopping;
@@ -47,7 +47,7 @@ public partial class MainWindow : Window
 
         var header = new TextBlock
         {
-            Text = "> WINDOWS DETECTION",
+            Text = "> LOCAL TRANSCRIPTION",
             Foreground = accentBrush,
             FontSize = 13,
             Margin = new Thickness(0, 0, 0, 3)
@@ -63,7 +63,7 @@ public partial class MainWindow : Window
 
         _detectionMetaTextBlock = new TextBlock
         {
-            Text = "LOCAL WINDOWS PHRASE SPOTTER",
+            Text = "LOCAL WHISPER TRANSCRIPTION",
             FontSize = 11,
             Opacity = 0.62,
             Margin = new Thickness(0, 2, 0, 0),
@@ -254,7 +254,7 @@ public partial class MainWindow : Window
 
         SetMonitoringState(true);
         StatusTextBlock.Text = $"STARTING MONITOR FOR {application.ProcessName.ToUpperInvariant()}...";
-        SetDetection("STARTING WINDOWS PHRASE SPOTTER...", "WAITING FOR APPLICATION AUDIO");
+        SetDetection("STARTING LOCAL TRANSCRIPTION...", "WHISPER TINY.EN // WAITING FOR MODEL");
 
         _settings = new AppSettings
         {
@@ -271,12 +271,22 @@ public partial class MainWindow : Window
 
         try
         {
-            StatusTextBlock.Text = "STARTING LOCAL PHRASE RECOGNITION...";
             _speechRecognizer = new SpeechRecognizerService(triggerPhrase);
             _speechRecognizer.TriggerDetected += OnTriggerDetected;
             _speechRecognizer.SpeechObserved += OnSpeechObserved;
             _speechRecognizer.InputLevelUpdated += OnInputLevelUpdated;
-            _speechRecognizer.Start();
+
+            if (_speechRecognizer.RequiresModelDownload)
+            {
+                StatusTextBlock.Text = "DOWNLOADING LOCAL WHISPER MODEL // FIRST RUN ONLY...";
+                SetDetection("DOWNLOADING SPEECH MODEL...", "WHISPER TINY.EN // STORED LOCALLY AFTER DOWNLOAD");
+            }
+            else
+            {
+                StatusTextBlock.Text = "STARTING LOCAL WHISPER TRANSCRIPTION...";
+            }
+
+            await _speechRecognizer.StartAsync();
 
             StatusTextBlock.Text = $"CONNECTING TO {application.ProcessName.ToUpperInvariant()} AUDIO...";
             _captureService.AudioDataAvailable += OnAudioDataAvailable;
@@ -290,13 +300,15 @@ public partial class MainWindow : Window
                 idleVolumePercent / 100.0,
                 _alertCancellation.Token);
 
-            SetDetection("LISTENING FOR TRIGGER...", $"TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // MINIMUM CONFIDENCE 68%");
+            SetDetection(
+                "LISTENING...",
+                $"WHISPER TINY.EN // TRIGGER \"{triggerPhrase.ToUpperInvariant()}\" // REQUIRES 2 MATCHING WINDOWS");
             StatusTextBlock.Text = $"MONITORING {application.ProcessName.ToUpperInvariant()} // WAITING FOR \"{triggerPhrase.ToUpperInvariant()}\".";
         }
         catch (Exception exception)
         {
             var error = $"COULD NOT START ({exception.GetType().Name.ToUpperInvariant()}): {exception.Message}";
-            SetDetection("DETECTION UNAVAILABLE", exception.Message.ToUpperInvariant());
+            SetDetection("TRANSCRIPTION UNAVAILABLE", exception.Message.ToUpperInvariant());
             await StopMonitoringAsync(false, error);
         }
     }
@@ -330,19 +342,27 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (observation.IsRejected)
+            if (!observation.IsSpeech || string.IsNullOrWhiteSpace(observation.Text))
             {
-                SetDetection("NO TRIGGER MATCH", "PHRASE SPOTTER ACTIVE // MINIMUM CONFIDENCE 68%");
+                SetDetection(
+                    "NO SPEECH TRANSCRIBED",
+                    $"WHISPER TINY.EN // NO-SPEECH {observation.NoSpeechProbability:P0}");
                 return;
             }
 
-            var text = string.IsNullOrWhiteSpace(observation.Text)
-                ? _settings.TriggerPhrase.ToUpperInvariant()
-                : observation.Text.Trim().ToUpperInvariant();
+            var text = observation.Text.Trim().ToUpperInvariant();
+
+            if (observation.MatchesTrigger)
+            {
+                SetDetection(
+                    $"TRIGGER CANDIDATE {Math.Min(observation.TriggerConfirmations, 2)}/2: \"{text}\"",
+                    $"WHISPER TINY.EN // CONFIDENCE {observation.Confidence:P0} // NO-SPEECH {observation.NoSpeechProbability:P0}");
+                return;
+            }
 
             SetDetection(
-                $"CANDIDATE: \"{text}\"",
-                $"CANDIDATE CONFIDENCE {observation.Confidence:P0} // NEED 68%");
+                $"HEARD: \"{text}\"",
+                $"WHISPER TINY.EN // CONFIDENCE {observation.Confidence:P0} // NO-SPEECH {observation.NoSpeechProbability:P0}");
         }));
     }
 
@@ -351,8 +371,8 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(new Action(async () =>
         {
             SetDetection(
-                $"TRIGGER: \"{recognizedText.ToUpperInvariant()}\"",
-                $"ACCEPTED // CONFIDENCE {confidence:P0}");
+                $"TRIGGER CONFIRMED: \"{recognizedText.ToUpperInvariant()}\"",
+                $"WHISPER TINY.EN // 2/2 MATCHING WINDOWS // CONFIDENCE {confidence:P0}");
             StatusTextBlock.Text = $"DETECTED {recognizedText.ToUpperInvariant()} ({confidence:P0}).";
             await StopMonitoringAsync(true);
         }));
@@ -403,13 +423,16 @@ public partial class MainWindow : Window
             await _captureService.StopAsync();
             _captureService.AudioDataAvailable -= OnAudioDataAvailable;
 
-            if (_speechRecognizer is not null)
+            var speechRecognizer = _speechRecognizer;
+            _speechRecognizer = null;
+
+            if (speechRecognizer is not null)
             {
-                _speechRecognizer.TriggerDetected -= OnTriggerDetected;
-                _speechRecognizer.SpeechObserved -= OnSpeechObserved;
-                _speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
-                _speechRecognizer.Dispose();
-                _speechRecognizer = null;
+                speechRecognizer.TriggerDetected -= OnTriggerDetected;
+                speechRecognizer.SpeechObserved -= OnSpeechObserved;
+                speechRecognizer.InputLevelUpdated -= OnInputLevelUpdated;
+                await speechRecognizer.StopAsync();
+                speechRecognizer.Dispose();
             }
 
             if (_alertTask is not null)
@@ -442,7 +465,7 @@ public partial class MainWindow : Window
             else
             {
                 StatusTextBlock.Text = "STOPPED.";
-                _detectionDetail = "MONITOR STOPPED // LAST PHRASE-SPOTTER RESULT SHOWN";
+                _detectionDetail = "MONITOR STOPPED // LAST WHISPER TRANSCRIPT SHOWN";
                 UpdateDetectionMeta();
             }
         }
