@@ -24,6 +24,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        VersionTextBlock.Cursor = Cursors.Hand;
+        VersionTextBlock.ToolTip = "Click to check for updates";
+        VersionTextBlock.MouseLeftButtonUp += VersionTextBlock_MouseLeftButtonUp;
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -37,27 +40,61 @@ public partial class MainWindow : Window
         ConfirmationPitchTextBox.Text = _settings.ConfirmationBeepPitchHz.ToString("0.##");
         VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay}";
         RefreshSelections();
-        await CheckForUpdatesAsync();
+        await CheckForUpdatesAsync(false);
     }
 
-    private async Task CheckForUpdatesAsync()
+    private async void VersionTextBlock_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        await CheckForUpdatesAsync(true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool userInitiated)
+    {
+        if (_updateService.HasStagedUpdate)
+        {
+            if (userInitiated)
+            {
+                StatusTextBlock.Text = "UPDATE ALREADY DOWNLOADED // CLOSE AFK NOTIFIER TO INSTALL.";
+            }
+            return;
+        }
+
+        var accent = new SolidColorBrush(Color.FromRgb(0xB0, 0xFF, 0xE0));
+        VersionTextBlock.Foreground = accent;
+
+        if (userInitiated)
+        {
+            StatusTextBlock.Text = "CHECKING GITHUB FOR UPDATES...";
+        }
+
         try
         {
             var update = await _updateService.CheckForUpdateAsync();
             if (update is null)
             {
+                VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay}";
+                if (userInitiated)
+                {
+                    StatusTextBlock.Text = $"UP TO DATE // V{_updateService.CurrentVersionDisplay}.";
+                }
                 return;
             }
 
             VersionTextBlock.Text = $"V{update.Version} // DOWNLOADING";
+            StatusTextBlock.Text = $"UPDATE {update.TagName.ToUpperInvariant()} FOUND // DOWNLOADING {update.AssetName.ToUpperInvariant()}...";
+
             await _updateService.StageUpdateAsync(update);
+
             VersionTextBlock.Text = $"V{update.Version} // READY";
-            VersionTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(0xB0, 0xFF, 0xE0));
+            StatusTextBlock.Text = $"UPDATE {update.TagName.ToUpperInvariant()} READY // CLOSE AFK NOTIFIER TO INSTALL AND RESTART.";
         }
-        catch
+        catch (Exception exception)
         {
-            VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay}";
+            VersionTextBlock.Text = $"V{_updateService.CurrentVersionDisplay} // UPDATE ERROR";
+            if (userInitiated)
+            {
+                StatusTextBlock.Text = $"UPDATE CHECK FAILED ({exception.GetType().Name.ToUpperInvariant()}): {exception.Message}";
+            }
         }
     }
 
